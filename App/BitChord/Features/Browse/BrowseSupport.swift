@@ -14,6 +14,7 @@ import SwiftUI
 /// repository over a stubbed `URLSession`.
 protocol BrowseCatalog: Sendable {
     func home() async throws -> HomeFeed
+    func home(chip: HomeChip?) async throws -> HomeFeed
     func homeRecentlyPlayed() async throws -> HomeShelf?
     func homeSupplement(browseId: String) async throws -> [HomeShelf]
     func moreHome(token: String) async throws -> HomeFeed
@@ -129,7 +130,8 @@ extension ShelfItem {
     /// ("Song • Chelsea Wolfe" → "Chelsea Wolfe"), or nil when the card is a collection.
     var shelfSong: Song? {
         guard let videoId, !videoId.isEmpty else { return nil }
-        return Song(videoId: videoId, title: title, artist: InnerTubeParser.artistFromSubtitle(subtitle), thumbnailUrl: thumbnailUrl)
+        return Song(videoId: videoId, title: title, artist: InnerTubeParser.artistFromSubtitle(subtitle),
+                    thumbnailUrl: thumbnailUrl, isVideo: isVideo ?? false)
     }
 
     /// The page a collection card opens, typed from its browse id (MainViewModel.browseTypeOf).

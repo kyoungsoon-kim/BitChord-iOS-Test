@@ -39,7 +39,7 @@ final class InnerTubeRequestTests: XCTestCase {
         XCTAssertEqual(client_.s("clientName"), "WEB_REMIX")
         XCTAssertEqual(client_.s("clientVersion"), "1.20250101.01.00")
         XCTAssertEqual(client_.s("hl"), "fr")
-        XCTAssertEqual(client_.s("gl"), "US")
+        XCTAssertEqual(client_.s("gl"), InnerTubeClient.region)
         XCTAssertNil(client_.s("visitorData"))
         XCTAssertEqual(body.o("context").o("user").s("lockedSafetyMode"), "false")
         XCTAssertNil(body.o("context").o("user").s("onBehalfOfUser"))

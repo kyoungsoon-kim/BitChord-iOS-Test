@@ -3,22 +3,10 @@ import InnerTube
 import PlaybackQueue
 import SwiftUI
 
-/// Home (ports ui/screens/HomeScreen.kt and how MainActivity.kt places it on the Home tab).
-///
-/// Top to bottom, as on Android: the page title ("Listen Now", here the navigation bar's large
-/// title — the iOS form of a big in-list heading that hands over to the bar as it scrolls away),
-/// the sign-in banner when signed out, then YouTube Music's shelves. "Recents" leads when signed
-/// in, as a sideways row of four-track columns or big cards (toggled in its heading); otherwise the first
-/// shelf is the big-card hero; every other shelf is a row of square cards. More shelves load as
-/// the end nears, and pulling down refreshes in place.
-///
-/// Tapping a song card plays it as a one-off (MainActivity's `playRadio`: it plays, the listener's
-/// queue follows, AutoPlay carries on); tapping any other card opens its page. Holding a card opens
-/// the song or album/playlist menu (none for artists). There is no toolbar of its own: the shared
-/// top bar is the only chrome.
+/// Home displays YouTube Music's filter chips and shelves in server order.
+/// Song and video cards play directly; collection cards open their browse pages.
 struct HomeScreen: View {
     @Environment(AppModel.self) private var model
-    @Environment(AppSettings.self) private var settings
     @State private var feed = HomeFeedModel()
     /// The shelves on screen (by `feedKey`), so paging only runs while the tail is in view.
     @State private var onScreen: Set<String> = []
@@ -37,23 +25,15 @@ struct HomeScreen: View {
                             .frame(width: proxy.size.width, alignment: .leading)
                             .padding(.bottom, 8)
                     }
+                    chipRow
                     // Each state gets a container of its own. The shell's version switched states
                     // inside one LazyVStack, skeletons as `ForEach(0..<4, id: \.self)` and shelves as
                     // `ForEach(…, id: \.offset)`: the same ids, so the lazy stack kept the skeleton
                     // rows it already had and Home stayed on its skeleton over a loaded feed.
                     switch state {
                     case .loading:
-                        VStack(alignment: .leading, spacing: 0) {
-                            if feed.recentlyPlayedLoading {
-                                RecentsSkeleton(listLayout: settings.homeRecentsViewType == .list, width: proxy.size.width)
-                                // Recents owns the leading layout while it loads, so the feed
-                                // behind it starts with ordinary shelves rather than a hero.
-                                FeedSkeleton(firstIsHero: false, width: proxy.size.width)
-                            } else {
-                                FeedSkeleton(width: proxy.size.width)
-                            }
-                        }
-                        .transition(.opacity)
+                        FeedSkeleton(width: proxy.size.width)
+                            .transition(.opacity)
                     case .error(let message):
                         BrowseMessage(message: message, actionTitle: L10n.retry) { reload() }
                         // The feed needs a connection; what's already on the device doesn't.
@@ -103,11 +83,56 @@ struct HomeScreen: View {
         .accessibilityIdentifier("screen.home")
     }
 
+    @ViewBuilder
+    private var chipRow: some View {
+        if !feed.chips.isEmpty || feed.selectedChip != nil {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    if feed.selectedChip != nil {
+                        Button { selectChip(nil) } label: {
+                            Image(systemName: "xmark")
+                                .font(BrowseFont.label)
+                                .padding(8)
+                                .background(Color(.secondarySystemFill), in: RoundedRectangle(cornerRadius: 12))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(L10n.clear)
+                        .accessibilityIdentifier("home.chip.clear")
+                    }
+                    ForEach(Array(feed.chips.enumerated()), id: \.offset) { index, chip in
+                        let selected = chip.isSelected || (feed.selectedChip?.browseId == chip.browseId
+                            && feed.selectedChip?.params == chip.params)
+                        Button { selectChip(chip) } label: {
+                            Text(chip.title)
+                                .font(BrowseFont.label)
+                                .lineLimit(1)
+                                .foregroundStyle(selected ? Color(.systemBackground) : Color.primary)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(selected ? Color.primary : Color(.secondarySystemFill),
+                                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(selected ? [.isSelected] : [])
+                        .accessibilityIdentifier("home.chip.\(index)")
+                    }
+                }
+                .padding(.horizontal, BrowseMetrics.gutter)
+                .padding(.vertical, 6)
+            }
+        }
+    }
+
+    private func selectChip(_ chip: HomeChip?) {
+        Haptics.shared.play(.select)
+        onScreen.removeAll()
+        let catalog = model.repository
+        let listener = model.accounts.listenerKey
+        Task { await feed.selectChip(chip, catalog: catalog, listener: listener) }
+    }
+
     private func shelfList(_ shelves: [HomeShelf], width: CGFloat) -> some View {
         LazyVStack(alignment: .leading, spacing: 0) {
-            if feed.recentlyPlayedLoading {
-                RecentsSkeleton(listLayout: settings.homeRecentsViewType == .list, width: width)
-            }
             // Keyed by position and title, like HomeScreen.kt's `shelf.title + index`.
             ForEach(Array(shelves.enumerated()), id: \.element.feedKey) { index, shelf in
                 shelfView(index: index, shelf: shelf, width: width)
@@ -138,8 +163,7 @@ struct HomeScreen: View {
         let open: (ShelfItem) -> Void = { item in openItem(item, shelfTitle: shelf.title) }
         if index == 0 && shelf.title.caseInsensitiveCompare(Self.recentsTitle) == .orderedSame {
             RecentShelf(shelf: shelf, width: width, onOpen: open, onMenu: openMenu)
-        } else if index == 0 && !feed.recentlyPlayedLoading {
-            // The loading skeleton already owns the hero slot until Recents lands.
+        } else if index == 0 {
             HeroShelf(shelf: shelf, width: width, onOpen: open, onMenu: openMenu)
         } else {
             HomeShelfRow(shelf: shelf, onOpen: open, onMenu: openMenu)

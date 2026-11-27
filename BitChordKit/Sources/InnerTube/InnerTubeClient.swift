@@ -24,8 +24,15 @@ public actor InnerTubeClient {
     public static let musicOrigin = "https://music.youtube.com"
     static let musicBase = "https://music.youtube.com/youtubei/v1"
     static let youtubeOrigin = "https://www.youtube.com"
-    /// `gl`. Android pins it; the catalogue answers are the US ones regardless of the device region.
-    public static let region = "US"
+    /// `gl`, following the device's two-letter region when available.
+    public static let region = regionIdentifier(Locale.current.region?.identifier)
+
+    static func regionIdentifier(_ identifier: String?) -> String {
+        guard let identifier, identifier.count == 2 else { return "US" }
+        let region = identifier.uppercased()
+        guard region.utf8.count == 2, region.utf8.allSatisfy({ (65...90).contains($0) }) else { return "US" }
+        return region
+    }
 
     /// Fallback WEB_REMIX version, used until the session scope reads the live one out of the
     /// music.youtube.com shell. Only a starting point: the real version moves every few days, and

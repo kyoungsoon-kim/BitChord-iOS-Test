@@ -132,13 +132,16 @@ public struct ShelfItem: Codable, Hashable, Sendable {
     public var thumbnailUrl: String?
     public var videoId: String?
     public var browseId: String?
+    /// Nil on older cached cards; treated as a catalogue audio track.
+    public var isVideo: Bool?
 
-    public init(title: String, subtitle: String, thumbnailUrl: String?, videoId: String?, browseId: String?) {
+    public init(title: String, subtitle: String, thumbnailUrl: String?, videoId: String?, browseId: String?, isVideo: Bool? = nil) {
         self.title = title
         self.subtitle = subtitle
         self.thumbnailUrl = thumbnailUrl
         self.videoId = videoId
         self.browseId = browseId
+        self.isVideo = isVideo
     }
 }
 
@@ -166,14 +169,41 @@ public struct HomeShelf: Codable, Hashable, Sendable {
     }
 }
 
+/// A server-defined Home filter and its exact browse destination.
+public struct HomeChip: Codable, Hashable, Sendable {
+    public var title: String
+    public var browseId: String
+    public var params: String?
+    public var isSelected: Bool
+
+    public init(title: String, browseId: String, params: String? = nil, isSelected: Bool = false) {
+        self.title = title
+        self.browseId = browseId
+        self.params = params
+        self.isSelected = isSelected
+    }
+}
+
 /// A page of the Home feed, plus the token for the next one (nil once exhausted).
 public struct HomeFeed: Codable, Hashable, Sendable {
     public var shelves: [HomeShelf]
     public var continuation: String?
+    /// Optional in persisted JSON; older feeds decode with no chips.
+    public var chips: [HomeChip]
 
-    public init(shelves: [HomeShelf], continuation: String?) {
+    public init(shelves: [HomeShelf], continuation: String?, chips: [HomeChip] = []) {
         self.shelves = shelves
         self.continuation = continuation
+        self.chips = chips
+    }
+
+    private enum CodingKeys: String, CodingKey { case shelves, continuation, chips }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        shelves = try values.decode([HomeShelf].self, forKey: .shelves)
+        continuation = try values.decodeIfPresent(String.self, forKey: .continuation)
+        chips = try values.decodeIfPresent([HomeChip].self, forKey: .chips) ?? []
     }
 }
 

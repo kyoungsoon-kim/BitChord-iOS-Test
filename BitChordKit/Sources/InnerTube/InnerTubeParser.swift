@@ -199,11 +199,28 @@ public enum InnerTubeParser {
 
     // MARK: - Home feed
 
-    static func parseHome(_ response: InnerTubeJSON) -> [HomeShelf] {
+    static func parseHome(_ response: InnerTubeJSON, allowVideos: Bool = false) -> [HomeShelf] {
         sectionListContents(response).compactMap { section in
-            if let carousel = section.o("musicCarouselShelfRenderer"), let shelf = carouselShelf(carousel) { return shelf }
-            if let plain = section.o("musicShelfRenderer") { return plainShelf(plain) }
+            if let carousel = section.o("musicCarouselShelfRenderer")
+                ?? (allowVideos ? section.o("musicImmersiveCarouselShelfRenderer") : nil),
+               let shelf = carouselShelf(carousel, allowVideos: allowVideos) { return shelf }
+            if let plain = section.o("musicShelfRenderer") { return plainShelf(plain, allowVideos: allowVideos) }
             return nil
+        }
+    }
+
+    static func parseHomeChips(_ response: InnerTubeJSON) -> [HomeChip] {
+        let chips = response.o("contents").o("singleColumnBrowseResultsRenderer").a("tabs")?.first
+            .o("tabRenderer").o("content").o("sectionListRenderer")
+            .o("header").o("chipCloudRenderer").a("chips") ?? []
+        return chips.compactMap { item in
+            guard let chip = item.o("chipCloudChipRenderer"),
+                  let endpoint = chip.o("navigationEndpoint").o("browseEndpoint"),
+                  let browseId = endpoint.s("browseId"), !browseId.isBlankText else { return nil }
+            let title = chip.o("text").runs()
+            guard !title.isBlankText else { return nil }
+            return HomeChip(title: title, browseId: browseId, params: endpoint.s("params"),
+                            isSelected: chip.s("isSelected") == "true")
         }
     }
 
@@ -240,19 +257,21 @@ public enum InnerTubeParser {
     /// ``parseHome(_:)`` reads off a fixed path — so the shelves are walked out wherever they land
     /// instead, the same tradeoff ``collectSongsDeep(_:)`` makes for song rows. Preserves the order
     /// they were found in, since a carousel and a plain shelf never share a parent node.
-    static func parseHomeContinuation(_ root: InnerTubeJSON) -> [HomeShelf] {
+    static func parseHomeContinuation(_ root: InnerTubeJSON, allowVideos: Bool = false) -> [HomeShelf] {
         var out: [HomeShelf] = []
         func walk(_ node: InnerTubeJSON) {
             switch node {
             case .object(let object):
-                if let carousel = object["musicCarouselShelfRenderer"], case .object = carousel,
-                   let shelf = carouselShelf(carousel) {
+                if let carousel = object["musicCarouselShelfRenderer"]
+                    ?? (allowVideos ? object["musicImmersiveCarouselShelfRenderer"] : nil), case .object = carousel,
+                   let shelf = carouselShelf(carousel, allowVideos: allowVideos) {
                     out.append(shelf)
                 }
-                if let plain = object["musicShelfRenderer"], case .object = plain, let shelf = plainShelf(plain) {
+                if let plain = object["musicShelfRenderer"], case .object = plain,
+                   let shelf = plainShelf(plain, allowVideos: allowVideos) {
                     out.append(shelf)
                 }
-                for value in object.values { walk(value) }
+                for (key, value) in object.entries where key != "musicTastebuilderShelfRenderer" { walk(value) }
             case .array(let array):
                 for value in array { walk(value) }
             default:
@@ -263,17 +282,26 @@ public enum InnerTubeParser {
         return out
     }
 
-    private static func carouselShelf(_ carousel: InnerTubeJSON) -> HomeShelf? {
+    private static func carouselShelf(_ carousel: InnerTubeJSON, allowVideos: Bool = false) -> HomeShelf? {
         let header = carousel.o("header").o("musicCarouselShelfBasicHeaderRenderer")
         let title = header.o("title").runs()
         let strapline = header.o("strapline").runs()
-        // Whole shelves like "Video charts" carry nothing but video compilations — each card would
-        // fail its own video check on the way to a dead-end page, so the shelf is dropped outright.
-        if Patterns.videoWord.containsMatch(in: title) { return nil }
+        if !allowVideos, Patterns.videoWord.containsMatch(in: title) { return nil }
         let items: [ShelfItem] = (carousel.a("contents") ?? []).compactMap { item in
-            if let card = parseTwoRowItem(item.o("musicTwoRowItemRenderer")) { return card }
-            if let song = parseResponsiveListItem(item.o("musicResponsiveListItemRenderer")), !song.isVideo {
-                return ShelfItem(title: song.title, subtitle: song.artist, thumbnailUrl: song.thumbnailUrl, videoId: song.videoId, browseId: nil)
+            if let card = parseTwoRowItem(item.o("musicTwoRowItemRenderer"), allowVideos: allowVideos) { return card }
+            if let song = parseResponsiveListItem(item.o("musicResponsiveListItemRenderer")), allowVideos || !song.isVideo {
+                return ShelfItem(title: song.title, subtitle: song.artist, thumbnailUrl: song.thumbnailUrl,
+                                 videoId: song.videoId, browseId: nil, isVideo: song.isVideo ? true : nil)
+            }
+            if allowVideos, let episode = item.o("musicMultiRowListItemRenderer"),
+               let videoId = episode.o("navigationEndpoint").o("watchEndpoint").s("videoId")
+                ?? episode.o("onTap").o("watchEndpoint").s("videoId"), !videoId.isBlankText {
+                let title = episode.o("title").runs()
+                guard !title.isBlankText else { return nil }
+                let thumbnails = episode.o("thumbnail").o("musicThumbnailRenderer").o("thumbnail").a("thumbnails")
+                return ShelfItem(title: title, subtitle: episode.o("subtitle").runs(),
+                                 thumbnailUrl: thumbnails.bestThumbnail(), videoId: videoId, browseId: nil,
+                                 isVideo: thumbnails.isNotSquare() ? true : nil)
             }
             // A chart row with nothing to play — "Top artists" lists the artist alone, no track —
             // falls through parseResponsiveListItem (it demands a videoId) and used to drop the
@@ -284,13 +312,14 @@ public enum InnerTubeParser {
         return HomeShelf(title: title.isBlankText ? "For you" : title, items: items, subtitle: strapline)
     }
 
-    private static func plainShelf(_ shelf: InnerTubeJSON) -> HomeShelf? {
+    private static func plainShelf(_ shelf: InnerTubeJSON, allowVideos: Bool = false) -> HomeShelf? {
         let title = shelf.o("title").runs()
-        if Patterns.videoWord.containsMatch(in: title) { return nil }
+        if !allowVideos, Patterns.videoWord.containsMatch(in: title) { return nil }
         let items = (shelf.a("contents") ?? [])
             .compactMap { parseResponsiveListItem($0.o("musicResponsiveListItemRenderer")) }
-            .filter { !$0.isVideo }
-            .map { ShelfItem(title: $0.title, subtitle: $0.artist, thumbnailUrl: $0.thumbnailUrl, videoId: $0.videoId, browseId: nil) }
+            .filter { allowVideos || !$0.isVideo }
+            .map { ShelfItem(title: $0.title, subtitle: $0.artist, thumbnailUrl: $0.thumbnailUrl,
+                             videoId: $0.videoId, browseId: nil, isVideo: $0.isVideo ? true : nil) }
         if items.isEmpty { return nil }
         return HomeShelf(title: title.isBlankText ? "For you" : title, items: items)
     }
@@ -1134,7 +1163,7 @@ public enum InnerTubeParser {
         }
     }
 
-    private static func parseTwoRowItem(_ renderer: InnerTubeJSON?) -> ShelfItem? {
+    private static func parseTwoRowItem(_ renderer: InnerTubeJSON?, allowVideos: Bool = false) -> ShelfItem? {
         guard let renderer else { return nil }
         let title = renderer.o("title").runs()
         if title.isBlankText { return nil }
@@ -1149,18 +1178,24 @@ public enum InnerTubeParser {
         let thumbnails = renderer.o("thumbnailRenderer").o("musicThumbnailRenderer").o("thumbnail").a("thumbnails")
         let subtitle = renderer.o("subtitle").runs()
         // A card with no browse target is a playable track; widescreen art on one of those means
-        // it's a music-video upload rather than the catalogue track — drop it.
-        if resolvedBrowseId == nil, videoId != nil, thumbnails.isNotSquare() { return nil }
+        // it's a music-video upload rather than the catalogue track. Home keeps those uploads.
+        if !allowVideos, resolvedBrowseId == nil, videoId != nil, thumbnails.isNotSquare() { return nil }
         // An album/playlist billed as a video chart/compilation is the same dead-end as in
         // parseBrowseItem. A plain track card is exempt: a song can legitimately be titled "Video
         // Games" without being a music-video upload.
-        if let resolvedBrowseId,
+        if !allowVideos, let resolvedBrowseId,
            !resolvedBrowseId.hasPrefix("VL"), !resolvedBrowseId.hasPrefix("PL"),
            !resolvedBrowseId.hasPrefix("MPRE"), !resolvedBrowseId.hasPrefix("UC"),
            Patterns.videoWord.containsMatch(in: title) || Patterns.videoWord.containsMatch(in: subtitle) {
             return nil
         }
-        return ShelfItem(title: title, subtitle: subtitle, thumbnailUrl: thumbnails.bestThumbnail(), videoId: videoId, browseId: resolvedBrowseId)
+        let videoType = endpoint.o("watchEndpoint").o("watchEndpointMusicSupportedConfigs")
+            .o("watchEndpointMusicConfig").s("musicVideoType")
+        let isVideo = videoId != nil && (thumbnails.isNotSquare()
+            || videoType == "MUSIC_VIDEO_TYPE_OMV" || videoType == "MUSIC_VIDEO_TYPE_UGC"
+            || subtitle.splitText(" • ").contains { $0.lowercased() == "video" })
+        return ShelfItem(title: title, subtitle: subtitle, thumbnailUrl: thumbnails.bestThumbnail(),
+                         videoId: videoId, browseId: resolvedBrowseId, isVideo: allowVideos && isVideo ? true : nil)
     }
 
     /// The credit out of a shelf card's subtitle, which reads "Song • Chelsea Wolfe" rather than just

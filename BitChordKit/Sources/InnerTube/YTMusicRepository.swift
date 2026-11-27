@@ -45,37 +45,40 @@ public final class YTMusicRepository: Sendable {
 
     // MARK: - Home
 
-    /// The core personalised feed, with FEmusic_home's own continuation for ``moreHome(token:)``.
-    /// Deliberately independent from the optional shelves below, so it can be painted immediately.
-    /// Signed in, the continuation keeps paging into mood mixes and more personalised shelves;
-    /// signed out it comes back empty.
+    /// The official personalised feed, including videos, chips and its own continuation.
     public func home() async throws -> HomeFeed {
+        try await home(chip: nil)
+    }
+
+    /// A Home filter, or the plain feed when clearing/re-tapping a selected filter.
+    public func home(chip: HomeChip?) async throws -> HomeFeed {
         try await call("home") {
-            let home = try await self.client.browse("FEmusic_home")
-            return HomeFeed(shelves: InnerTubeParser.parseHome(home), continuation: InnerTubeParser.continuationToken(home))
+            let target: HomeChip? = chip.flatMap { $0.isSelected ? nil : $0 }
+            let home = try await self.client.browse(target?.browseId ?? "FEmusic_home", params: target?.params)
+            return HomeFeed(shelves: InnerTubeParser.parseHome(home, allowVideos: true),
+                            continuation: InnerTubeParser.continuationToken(home),
+                            chips: InnerTubeParser.parseHomeChips(home))
         }
     }
 
-    /// "Recently played", rendered independently at the top of the Home page. Nil signed out, and
-    /// when the history is empty.
+    /// An independently available history shelf. Nil signed out or when history is empty.
     public func homeRecentlyPlayed() async throws -> HomeShelf? {
         try await call("home:recent") { try await self.recentlyPlayed() }
     }
 
-    /// Extra Home shelves, independently fetchable so each can appear as soon as it arrives.
+    /// Extra browse shelves, available independently of the official Home feed.
     public func homeSupplement(browseId: String) async throws -> [HomeShelf] {
         try await call("home:\(browseId)") { try await self.shelves(of: browseId) }
     }
 
-    public static let homeSupplementBrowseIds = ["FEmusic_new_releases", "FEmusic_explore"]
+    public static let homeSupplementBrowseIds: [String] = []
 
-    /// More Home shelves past ``home()``'s first page, following FEmusic_home's own continuation.
-    /// "Recently played" and the supplements are one-shot and don't participate.
+    /// More shelves, following the continuation belonging to the current Home filter.
     public func moreHome(token: String) async throws -> HomeFeed {
         try await call("home:more") {
             let response = try await self.client.browseContinuation(token)
             return HomeFeed(
-                shelves: InnerTubeParser.parseHomeContinuation(response),
+                shelves: InnerTubeParser.parseHomeContinuation(response, allowVideos: true),
                 continuation: InnerTubeParser.continuationToken(response)
             )
         }
@@ -131,7 +134,7 @@ public final class YTMusicRepository: Sendable {
     /// finally whatever was found even if all of it was excluded.
     public func quickPicks(excluding excludedIds: Set<String> = []) async throws -> [Song] {
         try await call("quickPicks") {
-            let shelves = (try? await self.client.browse("FEmusic_home")).map(InnerTubeParser.parseHome) ?? []
+            let shelves = (try? await self.client.browse("FEmusic_home")).map { InnerTubeParser.parseHome($0) } ?? []
             func songs(_ shelves: [HomeShelf], excluding: Set<String>) -> [Song] {
                 shelves.flatMap { shelf in
                     shelf.items.compactMap { item -> Song? in

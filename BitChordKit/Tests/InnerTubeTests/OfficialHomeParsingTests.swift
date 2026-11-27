@@ -1,0 +1,136 @@
+import XCTest
+import BitChordCore
+@testable import InnerTube
+
+final class OfficialHomeParsingTests: XCTestCase {
+    func testRegionUsesTwoLettersOrFallsBackToUS() {
+        XCTAssertEqual(InnerTubeClient.regionIdentifier("kr"), "KR")
+        XCTAssertEqual(InnerTubeClient.regionIdentifier("GB"), "GB")
+        let identifiers: [String?] = [nil, "", "K", "KOR", "419", "12", "éx", "ß", " KR", "en_US"]
+        for identifier in identifiers {
+            XCTAssertEqual(InnerTubeClient.regionIdentifier(identifier), "US", identifier ?? "nil")
+        }
+        XCTAssertEqual(InnerTubeClient.region, InnerTubeClient.regionIdentifier(Locale.current.region?.identifier))
+    }
+
+    func testHomeKeepsVideoShelvesCardsAndResponsiveRowsOnlyWhenAllowed() throws {
+        let response = home(#"""
+        [
+          {"musicCarouselShelfRenderer":{
+            "header":{"musicCarouselShelfBasicHeaderRenderer":{"title":{"runs":[{"text":"Music videos"}]}}},
+            "contents":[
+              {"musicTwoRowItemRenderer":{"title":{"runs":[{"text":"Wide video"}]},
+                "navigationEndpoint":{"watchEndpoint":{"videoId":"wide"}},
+                "thumbnailRenderer":{"musicThumbnailRenderer":{"thumbnail":{"thumbnails":[{"url":"wide.jpg","width":400,"height":225}]}}}}},
+              {"musicTwoRowItemRenderer":{"title":{"runs":[{"text":"Video charts"}]},
+                "navigationEndpoint":{"browseEndpoint":{"browseId":"FEmusic_charts_videos"}}}},
+              {"musicResponsiveListItemRenderer":{"playlistItemData":{"videoId":"row"},
+                "flexColumns":[
+                  {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Responsive video"}]}}},
+                  {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Video • Artist"}]}}}
+                ]}},
+              {"musicTwoRowItemRenderer":{"title":{"runs":[{"text":"Audio page"}]},
+                "navigationEndpoint":{"browseEndpoint":{"browseId":"MPEDaudio"}}}},
+              {"musicTwoRowItemRenderer":{"title":{"runs":[{"text":"Square video"}]},
+                "navigationEndpoint":{"watchEndpoint":{"videoId":"square",
+                  "watchEndpointMusicSupportedConfigs":{"watchEndpointMusicConfig":{"musicVideoType":"MUSIC_VIDEO_TYPE_OMV"}}}}}}
+            ]}},
+          {"musicShelfRenderer":{"title":{"runs":[{"text":"More videos"}]},"contents":[
+            {"musicResponsiveListItemRenderer":{"playlistItemData":{"videoId":"plain"},
+              "flexColumns":[
+                {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Plain video"}]}}},
+                {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Video • Artist"}]}}}
+              ]}}
+          ]}}
+        ]
+        """#)
+        let shelves = InnerTubeParser.parseHome(response, allowVideos: true)
+        XCTAssertEqual(shelves.map(\.title), ["Music videos", "More videos"])
+        XCTAssertEqual(shelves[0].items.compactMap(\.videoId), ["wide", "row", "audio", "square"])
+        XCTAssertEqual(shelves[0].items[0].isVideo, true)
+        XCTAssertEqual(shelves[0].items[1].browseId, "FEmusic_charts_videos")
+        XCTAssertEqual(shelves[0].items[2].isVideo, true)
+        XCTAssertNil(shelves[0].items[3].browseId)
+        XCTAssertEqual(shelves[0].items[4].isVideo, true)
+        XCTAssertEqual(shelves[1].items.first?.videoId, "plain")
+        XCTAssertEqual(shelves[1].items.first?.isVideo, true)
+        XCTAssertTrue(InnerTubeParser.parseHome(response).isEmpty, "non-Home callers keep filtering videos")
+        XCTAssertEqual(InnerTubeParser.parseHomeContinuation(response, allowVideos: true), shelves)
+        XCTAssertTrue(InnerTubeParser.parseHomeContinuation(response).isEmpty)
+    }
+
+    func testImmersiveCarouselAndPodcastEpisodesKeepTheirOrderOnBothPages() throws {
+        let response = home(#"""
+        [
+          {"musicImmersiveCarouselShelfRenderer":{
+            "header":{"musicCarouselShelfBasicHeaderRenderer":{
+              "title":{"runs":[{"text":"For the evening"}]},"strapline":{"runs":[{"text":"Made for you"}]}}},
+            "contents":[
+              {"musicTwoRowItemRenderer":{"title":{"runs":[{"text":"A mix"}]},
+                "navigationEndpoint":{"browseEndpoint":{"browseId":"VLRDmix"}}}},
+              {"musicMultiRowListItemRenderer":{"title":{"runs":[{"text":"Episode "},{"text":"one"}]},
+                "subtitle":{"runs":[{"text":"Podcast • Host"}]},
+                "navigationEndpoint":{"watchEndpoint":{"videoId":"episode1"}},
+                "thumbnail":{"musicThumbnailRenderer":{"thumbnail":{"thumbnails":[{"url":"episode.jpg","width":200,"height":200}]}}}}},
+              {"musicMultiRowListItemRenderer":{"title":{"runs":[{"text":"No playable endpoint"}]}}}
+            ]}},
+          {"musicTastebuilderShelfRenderer":{"title":{"runs":[{"text":"Pick artists"}]},"contents":[
+            {"musicCarouselShelfRenderer":{
+              "header":{"musicCarouselShelfBasicHeaderRenderer":{"title":{"runs":[{"text":"Hidden tastebuilder shelf"}]}}},
+              "contents":[{"musicTwoRowItemRenderer":{"title":{"runs":[{"text":"Hidden track"}]},
+                "navigationEndpoint":{"watchEndpoint":{"videoId":"hidden"}}}}]}}
+          ]}},
+          {"musicCarouselShelfRenderer":{
+            "header":{"musicCarouselShelfBasicHeaderRenderer":{"title":{"runs":[{"text":"Next shelf"}]}}},
+            "contents":[{"musicTwoRowItemRenderer":{"title":{"runs":[{"text":"Track"}]},
+              "navigationEndpoint":{"watchEndpoint":{"videoId":"track"}}}}]}}
+        ]
+        """#)
+        let shelves = InnerTubeParser.parseHome(response, allowVideos: true)
+        XCTAssertEqual(shelves.map(\.title), ["For the evening", "Next shelf"])
+        XCTAssertEqual(shelves[0].subtitle, "Made for you")
+        XCTAssertEqual(shelves[0].items.map(\.title), ["A mix", "Episode one"])
+        let episode = try XCTUnwrap(shelves[0].items.last)
+        XCTAssertEqual(episode.videoId, "episode1")
+        XCTAssertNil(episode.browseId)
+        XCTAssertEqual(episode.subtitle, "Podcast • Host")
+        XCTAssertEqual(episode.thumbnailUrl, "episode.jpg")
+        // Continuations use another envelope; walking must preserve renderer order there too.
+        let sections = response.o("contents").o("singleColumnBrowseResultsRenderer").a("tabs")?.first
+            .o("tabRenderer").o("content").o("sectionListRenderer").a("contents") ?? []
+        let continuation: InnerTubeJSON = ["continuationContents": ["sectionListContinuation": ["contents": .array(sections)]]]
+        XCTAssertEqual(InnerTubeParser.parseHomeContinuation(continuation, allowVideos: true), shelves)
+        XCTAssertEqual(InnerTubeParser.parseHome(response).map(\.title), ["Next shelf"])
+    }
+
+    func testChipsKeepTitlesBrowseParamsAndSelectedState() {
+        let response = home("[]", header: #"""
+        {"chipCloudRenderer":{"chips":[
+          {"chipCloudChipRenderer":{"text":{"runs":[{"text":"Feel "},{"text":"good"}]},
+            "navigationEndpoint":{"browseEndpoint":{"browseId":"FEmusic_home","params":"FEEL_GOOD"}},"isSelected":true}},
+          {"chipCloudChipRenderer":{"text":{"runs":[{"text":"Focus"}]},
+            "navigationEndpoint":{"browseEndpoint":{"browseId":"FEfocus"}}}},
+          {"chipCloudChipRenderer":{"text":{"runs":[{"text":"Missing target"}]}}},
+          {"chipCloudChipRenderer":{"text":{"runs":[]},"navigationEndpoint":{"browseEndpoint":{"browseId":"ignored"}}}}
+        ]}}
+        """#)
+        XCTAssertEqual(InnerTubeParser.parseHomeChips(response), [
+            HomeChip(title: "Feel good", browseId: "FEmusic_home", params: "FEEL_GOOD", isSelected: true),
+            HomeChip(title: "Focus", browseId: "FEfocus"),
+        ])
+        XCTAssertTrue(InnerTubeParser.parseHomeChips(home("[]")).isEmpty)
+    }
+
+    func testOldCachedFeedsAndCardsDecodeWithoutNewFields() throws {
+        let old = Data(#"{"shelves":[{"title":"Mix","items":[{"title":"Song","subtitle":"Artist","videoId":"v"}],"subtitle":""}]}"#.utf8)
+        let feed = try JSONDecoder().decode(HomeFeed.self, from: old)
+        XCTAssertEqual(feed.chips, [])
+        XCTAssertNil(feed.shelves.first?.items.first?.isVideo)
+        let updated = HomeFeed(shelves: feed.shelves, continuation: "next", chips: [HomeChip(title: "Focus", browseId: "FEfocus")])
+        XCTAssertEqual(try JSONDecoder().decode(HomeFeed.self, from: JSONEncoder().encode(updated)), updated)
+    }
+
+    private func home(_ contents: String, header: String = "{}") -> InnerTubeJSON {
+        json(#"{"contents":{"singleColumnBrowseResultsRenderer":{"tabs":[{"tabRenderer":{"content":{"sectionListRenderer":{"header":\#(header),"contents":\#(contents)}}}}]}}}"#)
+    }
+}

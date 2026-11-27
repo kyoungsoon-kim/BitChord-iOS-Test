@@ -56,6 +56,44 @@ final class YTMusicRepositoryTests: XCTestCase {
         XCTAssertTrue(stub.stub.requests.isEmpty)
     }
 
+    func testHomeChipUsesItsBrowseIdAndParamsAndSelectedChipClears() async throws {
+        let chip = HomeChip(title: "Relax", browseId: "FEchip", params: "RELAX")
+        onBrowse("FEchip", params: "RELAX", body: #"""
+        {"contents":{"singleColumnBrowseResultsRenderer":{"tabs":[{"tabRenderer":{"content":{"sectionListRenderer":{
+          "header":{"chipCloudRenderer":{"chips":[{"chipCloudChipRenderer":{
+            "text":{"runs":[{"text":"Relax"}]},"isSelected":true,
+            "navigationEndpoint":{"browseEndpoint":{"browseId":"FEchip","params":"RELAX"}}
+          }}]}},
+          "contents":[{"musicCarouselShelfRenderer":{
+            "header":{"musicCarouselShelfBasicHeaderRenderer":{"title":{"runs":[{"text":"Videos for relaxing"}]}}},
+            "contents":[{"musicTwoRowItemRenderer":{"title":{"runs":[{"text":"A video"}]},
+              "navigationEndpoint":{"watchEndpoint":{"videoId":"video"}},
+              "thumbnailRenderer":{"musicThumbnailRenderer":{"thumbnail":{"thumbnails":[{"url":"u","width":400,"height":225}]}}}}}]
+          }}],"continuations":[{"nextContinuationData":{"continuation":"CHIP_PAGE_2"}}]
+        }}}}]}}}
+        """#)
+        let filtered = try await repository.home(chip: chip)
+        XCTAssertEqual(filtered.shelves.first?.items.first?.videoId, "video")
+        XCTAssertEqual(filtered.shelves.first?.items.first?.isVideo, true)
+        XCTAssertEqual(filtered.chips.first?.isSelected, true)
+        XCTAssertEqual(filtered.continuation, "CHIP_PAGE_2")
+        stub.onContinuation("CHIP_PAGE_2", body: #"""
+        {"continuationContents":{"sectionListContinuation":{"contents":[{"musicImmersiveCarouselShelfRenderer":{
+          "header":{"musicCarouselShelfBasicHeaderRenderer":{"title":{"runs":[{"text":"More videos"}]}}},
+          "contents":[{"musicTwoRowItemRenderer":{"title":{"runs":[{"text":"Next video"}]},
+            "navigationEndpoint":{"watchEndpoint":{"videoId":"next"}}}}]
+        }}]}}}
+        """#)
+        let more = try await repository.moreHome(token: "CHIP_PAGE_2")
+        XCTAssertEqual(more.shelves.first?.items.first?.videoId, "next")
+
+        onBrowse("FEmusic_home", params: nil, body: Self.home(shelves: [("Plain", ["plain"])]))
+        _ = try await repository.home(chip: filtered.chips.first)
+        _ = try await repository.home(chip: nil)
+        XCTAssertEqual(browseIds(), ["FEchip", "CHIP_PAGE_2", "FEmusic_home", "FEmusic_home"])
+        XCTAssertNil(InnerTubeStub.bodyField("params", of: try XCTUnwrap(stub.requests(to: "browse").last)))
+    }
+
     func testRecentlyPlayedIsTheHistoryFeedNewestFirst() async throws {
         try await signIn()
         try stub.onBrowse("FEmusic_history", fixture: "signed_in/history.json")
@@ -88,7 +126,7 @@ final class YTMusicRepositoryTests: XCTestCase {
     }
 
     func testSupplementsAreTheirOwnBrowseIds() async throws {
-        XCTAssertEqual(YTMusicRepository.homeSupplementBrowseIds, ["FEmusic_new_releases", "FEmusic_explore"])
+        XCTAssertTrue(YTMusicRepository.homeSupplementBrowseIds.isEmpty)
         try stub.onBrowse("FEmusic_new_releases", fixture: "new_releases.json")
         let shelves = try await repository.homeSupplement(browseId: "FEmusic_new_releases")
         XCTAssertEqual(shelves.map(\.title), ["Albums & singles"])

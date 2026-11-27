@@ -5,8 +5,7 @@ import SwiftUI
 import XCTest
 @testable import BitChord
 
-/// PORTING.md "Home feed": YouTube Music's shelves, Recents first when signed in, more shelves as
-/// the end nears, pull to refresh; a song card starts a one-off, a collection opens its page.
+/// Home preserves the official feed order, supports chips and pages, and plays track cards.
 @MainActor
 final class HomeFeedTests: XCTestCase {
     // MARK: - Against the real InnerTube client over recorded answers
@@ -24,12 +23,12 @@ final class HomeFeedTests: XCTestCase {
         XCTAssertTrue(shelves.contains { $0.title.contains("biggest hits") }, shelves.map(\.title).description)
         XCTAssertNotNil(feed.continuation, "FEmusic_home's own continuation is kept for paging")
         XCTAssertFalse(feed.loadingMore, "every first-page request settled")
-        XCTAssertFalse(feed.recentlyPlayedLoading)
         let requested = InnerTubeStub.requests.joined(separator: "\n")
         XCTAssertTrue(requested.contains("FEmusic_home"))
-        XCTAssertTrue(requested.contains("FEmusic_new_releases"), "supplements are fetched alongside")
+        XCTAssertFalse(requested.contains("FEmusic_new_releases"))
+        XCTAssertFalse(requested.contains("FEmusic_explore"))
         XCTAssertFalse(requested.contains("FEmusic_history"), "signed out: no Recents request")
-        // Titles are unique across the core feed and its supplements.
+        // Titles are unique within the official feed.
         let titles = shelves.map { $0.title.lowercased() }
         XCTAssertEqual(titles.count, Set(titles).count)
     }
@@ -61,70 +60,21 @@ final class HomeFeedTests: XCTestCase {
 
     // MARK: - Feed rules (scripted)
 
-    func testRecentsLeadWhenSignedInAndReplaceAStaleCopyFromTheFeed() async throws {
+    func testSignedInHomeKeepsServerOrderAndNeverFetchesRecentsOrSupplements() async throws {
         let catalog = ScriptedCatalog()
-        catalog.homeAnswer = { HomeFeed(shelves: [shelf("Quick picks", ["a"]), shelf("recents", ["old"])], continuation: nil) }
-        catalog.recentAnswer = {
-            try await Task.sleep(for: .milliseconds(50))
-            return shelf("Recents", ["r1", "r2"])
-        }
-        let feed = HomeFeedModel(supplementIds: [])
-
-        await feed.load(catalog, listener: "account-1", signedIn: true)
-
-        let shelves = try XCTUnwrap(feed.state.value)
-        XCTAssertEqual(shelves.map(\.title), ["Recents", "Quick picks"])
-        XCTAssertEqual(shelves[0].items.compactMap(\.videoId), ["r1", "r2"])
-        XCTAssertFalse(feed.recentlyPlayedLoading)
-        XCTAssertTrue(feed.isLoaded(for: "account-1"))
-        XCTAssertFalse(feed.isLoaded(for: nil), "signing out is a different listener and reloads")
-    }
-
-    func testWhileRecentsLoadsItsSkeletonOwnsTheHeadOfThePage() async throws {
-        let catalog = ScriptedCatalog()
-        let gate = AsyncGate()
-        catalog.homeAnswer = { HomeFeed(shelves: [shelf("Quick picks", ["a"])], continuation: nil) }
-        catalog.recentAnswer = {
-            await gate.wait()
-            return nil
-        }
-        let feed = HomeFeedModel(supplementIds: [])
-        let load = Task { await feed.load(catalog, listener: "k", signedIn: true) }
-        await waitUntil("core feed published") { feed.state.value != nil }
-        XCTAssertTrue(feed.recentlyPlayedLoading)
-        await gate.open()
-        await load.value
-        XCTAssertFalse(feed.recentlyPlayedLoading)
-        XCTAssertEqual(feed.state.value?.map(\.title), ["Quick picks"], "no history: no Recents shelf")
-    }
-
-    func testSupplementsJoinTheFeedWithoutRepeatingATitle() async throws {
-        let catalog = ScriptedCatalog()
-        catalog.homeAnswer = { HomeFeed(shelves: [shelf("Quick picks", ["a"]), shelf("New releases", ["b"])], continuation: "t1") }
-        catalog.supplementAnswers["FEmusic_new_releases"] = {
-            try await Task.sleep(for: .milliseconds(30))
-            return [shelf("new releases", ["c"]), shelf("Albums & singles", ["d"])]
-        }
-        let feed = HomeFeedModel(supplementIds: ["FEmusic_new_releases"])
-        await feed.load(catalog, listener: nil, signedIn: false)
-        XCTAssertEqual(feed.state.value?.map(\.title), ["Quick picks", "New releases", "Albums & singles"])
-    }
-
-    func testTheCoreFeedFailingIsOnlyAnErrorWhenNothingElseArrived() async throws {
-        let catalog = ScriptedCatalog()
-        catalog.homeAnswer = { throw InnerTubeError.httpStatus(403, endpoint: "browse") }
-        let feed = HomeFeedModel(supplementIds: [])
-        await feed.load(catalog, listener: nil, signedIn: false)
-        XCTAssertEqual(feed.state.errorMessage, L10n.youtubeRequestRejected)
-
-        catalog.supplementAnswers["FEmusic_explore"] = { [shelf("Charts", ["x"])] }
-        let withSupplement = HomeFeedModel(supplementIds: ["FEmusic_explore"])
         catalog.homeAnswer = {
-            try await Task.sleep(for: .milliseconds(50))
-            throw URLError(.timedOut)
+            HomeFeed(shelves: [shelf("Quick picks", ["a"]), shelf("recents", ["old"]),
+                               shelf("QUICK PICKS", ["duplicate"])], continuation: nil)
         }
-        await withSupplement.load(catalog, listener: nil, signedIn: false)
-        XCTAssertEqual(withSupplement.state.value?.map(\.title), ["Charts"], "a supplement already on screen stays")
+        let feed = HomeFeedModel()
+        await feed.load(catalog, listener: "account-1", signedIn: true)
+        XCTAssertEqual(feed.state.value?.map(\.title), ["Quick picks", "recents"])
+        XCTAssertEqual(catalog.calls, ["home"])
+        XCTAssertTrue(feed.isLoaded(for: "account-1"))
+        XCTAssertFalse(feed.isLoaded(for: nil))
+
+        await feed.refresh(catalog, listener: "account-1", signedIn: true)
+        XCTAssertEqual(catalog.calls, ["home", "home"])
     }
 
     func testPagingStopsWhenAPageAddsNothingNew() async throws {
@@ -135,7 +85,7 @@ final class HomeFeedTests: XCTestCase {
                 ? HomeFeed(shelves: [shelf("Mixed for you", ["m"])], continuation: "t2")
                 : HomeFeed(shelves: [shelf("Quick picks", ["a"])], continuation: "t3")
         }
-        let feed = HomeFeedModel(supplementIds: [])
+        let feed = HomeFeedModel()
         await feed.load(catalog, listener: nil, signedIn: false)
 
         await feed.loadMore(catalog)
@@ -155,7 +105,7 @@ final class HomeFeedTests: XCTestCase {
             round += 1
             return HomeFeed(shelves: [shelf("Round \(round)", ["a"])], continuation: nil)
         }
-        let feed = HomeFeedModel(supplementIds: [])
+        let feed = HomeFeedModel()
         await feed.load(catalog, listener: nil, signedIn: false)
         XCTAssertEqual(feed.state.value?.map(\.title), ["Round 1"])
 
@@ -175,7 +125,7 @@ final class HomeFeedTests: XCTestCase {
     func testARefreshFinishesWhenTheTaskThatAskedForItIsCancelled() async throws {
         let catalog = ScriptedCatalog()
         catalog.homeAnswer = { HomeFeed(shelves: [shelf("Round 1", ["a"])], continuation: nil) }
-        let feed = HomeFeedModel(supplementIds: [])
+        let feed = HomeFeedModel()
         await feed.load(catalog, listener: nil, signedIn: false)
 
         catalog.homeAnswer = {
@@ -196,7 +146,7 @@ final class HomeFeedTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(150))
             return HomeFeed(shelves: [shelf("Old account", ["a"])], continuation: nil)
         }
-        let feed = HomeFeedModel(supplementIds: [])
+        let feed = HomeFeedModel()
         let first = Task { await feed.load(catalog, listener: "old", signedIn: false) }
         try await Task.sleep(for: .milliseconds(20))
         catalog.homeAnswer = { HomeFeed(shelves: [shelf("New account", ["b"])], continuation: nil) }
@@ -205,125 +155,142 @@ final class HomeFeedTests: XCTestCase {
         XCTAssertEqual(feed.state.value?.map(\.title), ["New account"])
     }
 
-    // MARK: - Switching back to a listener (beyond Android)
+    // MARK: - Listener snapshots and filter generations
 
-    func testSwitchingBackPaintsTheListenersHomeFromTheirSnapshot() async throws {
+    func testSnapshotIsReplacedInFreshServerOrder() async throws {
         let catalog = ScriptedCatalog()
-        let feed = await feedThatLeftA(catalog)
+        let feed = HomeFeedModel()
+        catalog.homeAnswer = { HomeFeed(shelves: [shelf("Old mix", ["o"]), shelf("Quick picks", ["a"])], continuation: nil) }
+        await feed.load(catalog, listener: "A", signedIn: true)
+        catalog.homeAnswer = { HomeFeed(shelves: [shelf("B picks", ["b"])], continuation: nil) }
+        await feed.load(catalog, listener: "B", signedIn: true)
         let gate = AsyncGate()
-        answerAsAAgain(catalog, core: gate, others: gate)
-
-        let switchBack = Task { await feed.load(catalog, listener: "acct:A", signedIn: true) }
-        await waitUntil("A's core feed is asked for") { catalog.calls.filter { $0 == "home" }.count == 3 }
-        let painted = feed.state.value ?? []
-        let recentsSkeleton = feed.recentlyPlayedLoading
+        catalog.homeAnswer = {
+            await gate.wait()
+            return HomeFeed(shelves: [shelf("Quick picks", ["a2"]), shelf("New mix", ["n"])], continuation: nil)
+        }
+        let load = Task { await feed.load(catalog, listener: "A", signedIn: true) }
+        await waitUntil("snapshot restored") { catalog.calls.filter { $0 == "home" }.count == 3 }
+        XCTAssertEqual(feed.state.value?.map(\.title), ["Old mix", "Quick picks"])
         await gate.open()
-        await switchBack.value
-
-        XCTAssertEqual(painted.flatMap { $0.items.compactMap(\.videoId) }.sorted(), ["a", "n", "o", "r"],
-                       "A's own shelves are up before A's core feed returns, and none of B's")
-        XCTAssertFalse(recentsSkeleton, "the snapshot's Recents stands in for the skeleton")
-        assertTheFreshPageOfA(feed)
+        await load.value
+        XCTAssertEqual(feed.state.value?.map(\.title), ["Quick picks", "New mix"])
     }
 
-    func testOverASnapshotTheShelvesThatLandBeforeTheCoreFeedStay() async throws {
+    func testSigningOutDropsSnapshots() async throws {
         let catalog = ScriptedCatalog()
-        let feed = await feedThatLeftA(catalog)
-        let core = AsyncGate()
-        answerAsAAgain(catalog, core: core, others: nil)
-
-        let switchBack = Task { await feed.load(catalog, listener: "acct:A", signedIn: true) }
-        await waitUntil("the supplement and Recents landed over the snapshot") {
-            let ids = Set((feed.state.value ?? []).flatMap { $0.items.compactMap(\.videoId) })
-            return ids.isSuperset(of: ["n2", "r2"])
-        }
-        let held = feed.state.value ?? []
-        await core.open()
-        await switchBack.value
-
-        XCTAssertEqual(held.map(\.title).sorted(), ["New releases", "Old mix", "Quick picks", "Recents"],
-                       "each shelf once: the fresh ones in their stand-ins' places, the snapshot's core shelves still up")
-        XCTAssertTrue(held.contains { $0.items.first?.videoId == "a" }, "the core feed is held: its snapshot shelf stands in")
-        assertTheFreshPageOfA(feed)
-    }
-
-    func testOverASnapshotTheCoreFeedLandingFirstLeavesRoomForTheRest() async throws {
-        let catalog = ScriptedCatalog()
-        let feed = await feedThatLeftA(catalog)
-        let others = AsyncGate()
-        answerAsAAgain(catalog, core: nil, others: others)
-
-        let switchBack = Task { await feed.load(catalog, listener: "acct:A", signedIn: true) }
-        await waitUntil("the core feed landed over the snapshot") {
-            (feed.state.value ?? []).contains { $0.items.first?.videoId == "a2" }
-        }
-        let held = feed.state.value ?? []
-        await others.open()
-        await switchBack.value
-
-        XCTAssertTrue(held.contains { $0.items.first?.videoId == "n" }, "the supplement's snapshot shelf stays until its fresh copy lands")
-        XCTAssertEqual(held.map(\.title).count, Set(held.map(\.feedKey)).count, "no shelf twice: \(held.map(\.title))")
-        assertTheFreshPageOfA(feed)
-    }
-
-    func testSigningOutDropsTheHomeSnapshots() async throws {
-        let catalog = ScriptedCatalog()
-        let feed = await feedThatLeftA(catalog)
-        catalog.homeAnswer = { HomeFeed(shelves: [shelf("Guest picks", ["g"])], continuation: nil) }
+        let feed = HomeFeedModel()
+        catalog.homeAnswer = { HomeFeed(shelves: [shelf("A", ["a"])], continuation: nil) }
+        await feed.load(catalog, listener: "A", signedIn: true)
+        await feed.load(catalog, listener: "B", signedIn: true)
         await feed.load(catalog, listener: nil, signedIn: false)
         let gate = AsyncGate()
-        answerAsAAgain(catalog, core: gate, others: gate)
-
-        let signIn = Task { await feed.load(catalog, listener: "acct:A", signedIn: true) }
-        await waitUntil("A's core feed is asked for") { catalog.calls.filter { $0 == "home" }.count == 4 }
-        let paintedWhileLoading = feed.state
-        await gate.open()
-        await signIn.value
-
-        XCTAssertTrue(paintedWhileLoading.isLoading, "after a sign-out A starts from the skeleton: \(paintedWhileLoading)")
-        assertTheFreshPageOfA(feed)
-    }
-
-    /// A's first page (Recents, two core shelves, one supplement), then B's: A has a snapshot.
-    private func feedThatLeftA(_ catalog: ScriptedCatalog) async -> HomeFeedModel {
-        catalog.homeAnswer = { HomeFeed(shelves: [shelf("Quick picks", ["a"]), shelf("Old mix", ["o"])], continuation: nil) }
-        catalog.supplementAnswers["FEmusic_new_releases"] = { [shelf("New releases", ["n"])] }
-        catalog.recentAnswer = { shelf("Recents", ["r"]) }
-        let feed = HomeFeedModel(supplementIds: ["FEmusic_new_releases"])
-        await feed.load(catalog, listener: "acct:A", signedIn: true)
-
-        catalog.homeAnswer = { HomeFeed(shelves: [shelf("B picks", ["b"])], continuation: nil) }
-        catalog.supplementAnswers["FEmusic_new_releases"] = { [shelf("B releases", ["bn"])] }
-        catalog.recentAnswer = { shelf("Recents", ["rb"]) }
-        await feed.load(catalog, listener: "acct:B", signedIn: true)
-        XCTAssertEqual(Set(feed.state.value?.map(\.title) ?? []), ["Recents", "B picks", "B releases"])
-        return feed
-    }
-
-    /// A's fresh first page: the core feed no longer carries "Old mix". `core` holds the core
-    /// feed open and `others` the supplement and Recents.
-    private func answerAsAAgain(_ catalog: ScriptedCatalog, core: AsyncGate?, others: AsyncGate?) {
         catalog.homeAnswer = {
-            await core?.wait()
-            return HomeFeed(shelves: [shelf("Quick picks", ["a2"]), shelf("recents", ["stale"])], continuation: nil)
+            await gate.wait()
+            return HomeFeed(shelves: [], continuation: nil)
         }
-        catalog.supplementAnswers["FEmusic_new_releases"] = {
-            await others?.wait()
-            return [shelf("New releases", ["n2"])]
-        }
-        catalog.recentAnswer = {
-            await others?.wait()
-            return shelf("Recents", ["r2"])
-        }
+        let load = Task { await feed.load(catalog, listener: "A", signedIn: true) }
+        await waitUntil("fresh sign-in started") { catalog.calls.filter { $0 == "home" }.count == 4 }
+        XCTAssertTrue(feed.state.isLoading)
+        await gate.open()
+        await load.value
+        XCTAssertEqual(feed.state.value, [])
     }
 
-    /// Recents first, then the core shelf and the supplement, each once and fresh; nothing of B's
-    /// and nothing the fresh page dropped.
-    private func assertTheFreshPageOfA(_ feed: HomeFeedModel, file: StaticString = #filePath, line: UInt = #line) {
-        let shelves = feed.state.value ?? []
-        XCTAssertEqual(shelves.first?.title, "Recents", "\(shelves.map(\.title))", file: file, line: line)
-        XCTAssertEqual(shelves.map(\.title).sorted(), ["New releases", "Quick picks", "Recents"], file: file, line: line)
-        XCTAssertEqual(shelves.flatMap { $0.items.compactMap(\.videoId) }.sorted(), ["a2", "n2", "r2"], file: file, line: line)
+    func testChipSelectionPagesRefreshesAndClears() async throws {
+        let catalog = ScriptedCatalog()
+        let chip = HomeChip(title: "Relax", browseId: "FEmusic_home", params: "RELAX")
+        var selected = chip
+        selected.isSelected = true
+        selected.params = nil // The selected server chip points to the plain Home (deselect).
+        catalog.homeAnswer = { HomeFeed(shelves: [shelf("All", ["a"])], continuation: "plain", chips: [chip]) }
+        catalog.chipAnswer = { target in
+            XCTAssertEqual(target?.params, "RELAX")
+            XCTAssertEqual(target?.isSelected, false, "refresh keeps the filter instead of clearing it")
+            return HomeFeed(shelves: [shelf("Relax mixes", ["r"])], continuation: "relax-page", chips: [selected])
+        }
+        catalog.moreAnswer = { token in
+            XCTAssertEqual(token, "relax-page")
+            return HomeFeed(shelves: [shelf("More relax", ["m"])], continuation: nil)
+        }
+        let feed = HomeFeedModel()
+        await feed.load(catalog, listener: "A", signedIn: true)
+        XCTAssertEqual(feed.chips, [chip])
+        await feed.selectChip(chip, catalog: catalog, listener: "A")
+        XCTAssertEqual(feed.selectedChip, chip)
+        XCTAssertEqual(feed.chips, [selected], "server selection flags remain available for display")
+        await feed.loadMore(catalog)
+        XCTAssertEqual(feed.state.value?.map(\.title), ["Relax mixes", "More relax"])
+        XCTAssertEqual(feed.selectedChip, chip)
+        await feed.refresh(catalog, listener: "A", signedIn: true)
+        XCTAssertEqual(feed.continuation, "relax-page")
+        XCTAssertEqual(feed.selectedChip, chip)
+        XCTAssertEqual(catalog.calls, ["home", "chip:FEmusic_home:RELAX", "more:relax-page", "chip:FEmusic_home:RELAX"])
+        await feed.selectChip(selected, catalog: catalog, listener: "A")
+        XCTAssertNil(feed.selectedChip)
+        XCTAssertEqual(feed.continuation, "plain")
+        XCTAssertEqual(catalog.calls.last, "home", "tapping the server-selected chip clears")
+        await feed.selectChip(chip, catalog: catalog, listener: "A")
+        await feed.selectChip(chip, catalog: catalog, listener: "A")
+        XCTAssertNil(feed.selectedChip)
+        XCTAssertEqual(catalog.calls.last, "home", "tapping the original request target also clears")
+        await feed.selectChip(chip, catalog: catalog, listener: "A")
+        await feed.selectChip(nil, catalog: catalog, listener: "A")
+        XCTAssertNil(feed.selectedChip)
+        XCTAssertEqual(feed.state.value?.map(\.title), ["All"])
+        XCTAssertEqual(catalog.calls.last, "home", "the clear button returns to plain Home")
+    }
+
+    func testOnlyANonPlainServerSelectionCanSeedTheSelectedChip() async throws {
+        let catalog = ScriptedCatalog()
+        let plain = HomeChip(title: "All", browseId: "FEmusic_home", isSelected: true)
+        catalog.homeAnswer = { HomeFeed(shelves: [], continuation: nil, chips: [plain]) }
+        let feed = HomeFeedModel()
+        await feed.load(catalog, listener: "A", signedIn: true)
+        XCTAssertNil(feed.selectedChip)
+        XCTAssertEqual(feed.chips, [plain])
+
+        let filtered = HomeChip(title: "Focus", browseId: "FEmusic_home", params: "FOCUS", isSelected: true)
+        catalog.homeAnswer = { HomeFeed(shelves: [], continuation: nil, chips: [filtered]) }
+        await feed.load(catalog, listener: "A", signedIn: true)
+        var target = filtered
+        target.isSelected = false
+        XCTAssertEqual(feed.selectedChip, target)
+        XCTAssertEqual(feed.chips, [filtered])
+    }
+
+    func testChipChangeInvalidatesOldContinuationAndFirstPage() async throws {
+        let catalog = ScriptedCatalog()
+        catalog.homeAnswer = { HomeFeed(shelves: [shelf("All", ["a"])], continuation: "old-page") }
+        let feed = HomeFeedModel()
+        await feed.load(catalog, listener: "A", signedIn: true)
+        let gate = AsyncGate()
+        catalog.moreAnswer = { _ in
+            await gate.wait()
+            return HomeFeed(shelves: [shelf("Stale page", ["x"])], continuation: "stale")
+        }
+        let paging = Task { await feed.loadMore(catalog) }
+        await waitUntil("old continuation requested") { catalog.calls.contains("more:old-page") }
+        let chip = HomeChip(title: "Focus", browseId: "FEmusic_home", params: "FOCUS")
+        catalog.chipAnswer = { _ in HomeFeed(shelves: [shelf("Focus", ["f"])], continuation: "focus-page") }
+        await feed.selectChip(chip, catalog: catalog, listener: "A")
+        await gate.open()
+        await paging.value
+        XCTAssertEqual(feed.state.value?.map(\.title), ["Focus"])
+        XCTAssertEqual(feed.continuation, "focus-page")
+
+        let firstGate = AsyncGate()
+        catalog.chipAnswer = { _ in
+            await firstGate.wait()
+            return HomeFeed(shelves: [shelf("Stale first page", ["x"])], continuation: "stale")
+        }
+        let oldLoad = Task { await feed.selectChip(HomeChip(title: "Sleep", browseId: "FEmusic_home", params: "SLEEP"), catalog: catalog, listener: "A") }
+        await waitUntil("old chip requested") { catalog.calls.contains("chip:FEmusic_home:SLEEP") }
+        await feed.selectChip(nil, catalog: catalog, listener: "A")
+        await firstGate.open()
+        await oldLoad.value
+        XCTAssertEqual(feed.state.value?.map(\.title), ["All"])
+        XCTAssertNil(feed.selectedChip)
     }
 
     // MARK: - Cards
@@ -337,6 +304,19 @@ final class HomeFeedTests: XCTestCase {
         XCTAssertNil(album.shelfSong)
         XCTAssertEqual(album.shelfBrowseItem?.type, .album)
         XCTAssertEqual(ShelfItem(title: "A", subtitle: "", thumbnailUrl: nil, videoId: nil, browseId: "UCabc").shelfBrowseItem?.type, .artist)
+    }
+
+    func testVideoCardPlaysItsVideoIdInsteadOfOpeningItsBrowseTarget() {
+        let app = makeBrowseTestApp()
+        let card = ShelfItem(title: "Video", subtitle: "Video • Artist", thumbnailUrl: nil,
+                             videoId: "video-id", browseId: "MPEDvideo-id", isVideo: true)
+        XCTAssertEqual(card.shelfSong?.isVideo, true)
+        XCTAssertEqual(card.shelfSong?.isVideoOrigin, true)
+        BrowseNavigator(app: app).openCard(card, source: QueueSource(title: "Music videos", type: .home))
+        XCTAssertEqual(app.player.currentSong?.videoId, "video-id")
+        XCTAssertEqual(app.player.currentSong?.isVideo, true)
+        XCTAssertTrue(app.router.path(for: app.router.selectedTab).isEmpty)
+        app.player.engine.shutdown()
     }
 
     func testTappingASongCardStartsAOneOffFromIt() async throws {
@@ -397,7 +377,7 @@ extension HomeFeedTests {
     /// the reader was, so opening Home walked the whole continuation chain with the list at the
     /// top. HomeScreen.kt only pages while one of the last three shelves is on screen.
     ///
-    /// The recorded first page is short (four shelves, the tail on screen), so it legitimately
+    /// The recorded first page is short (two shelves, the tail on screen), so it legitimately
     /// asks for page two once. That page adds two shelves and pushes the tail below the fold: no
     /// further request may follow while the reader stays at the top.
     func testHomeDoesNotPageWhileTheTailIsOffScreen() async throws {

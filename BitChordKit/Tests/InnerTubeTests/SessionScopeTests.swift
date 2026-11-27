@@ -257,7 +257,7 @@ final class SessionScopeTests: XCTestCase {
         XCTAssertEqual(identity.liveClientVersion, "1.20260922.09.00")
         XCTAssertEqual(identity.webRemixClientVersion, "1.20260922.09.00")
         XCTAssertEqual(identity.language, "ja")
-        XCTAssertEqual(identity.region, "US")
+        XCTAssertEqual(identity.region, InnerTubeClient.region)
         XCTAssertEqual(identity.headers, [
             "Cookie": Self.cookie,
             "Authorization": Self.signature,

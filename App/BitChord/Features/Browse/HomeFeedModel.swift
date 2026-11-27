@@ -1,176 +1,136 @@
 import BitChordCore
 import Foundation
 
-/// Home's feed (ports the home half of ui/MainViewModel.kt: `loadHome`, `refreshHome`,
-/// `loadMoreHome`, `publishHomeShelves`).
-///
-/// The first page is a fan-out, each part published as it lands: YouTube Music's core feed, one
-/// browse per supplement (New releases, Explore), and — signed in — "Recently played", which owns
-/// the head of the page and has its own skeleton there. Shelves are de-duplicated by title across
-/// all of them, and a newer load (or a different listener) makes every older answer harmless.
+/// YouTube Music's Home shelves in server order, de-duplicated by title.
+/// A newer request or listener invalidates every older answer, including pagination.
 @MainActor
 @Observable
 final class HomeFeedModel {
     private(set) var state: LoadState<[HomeShelf]> = .loading
-    /// Signed in and the history request is still out: Recents' skeleton leads the page.
-    private(set) var recentlyPlayedLoading = false
-    /// Pull to refresh in flight (the content stays up).
+    private(set) var chips: [HomeChip] = []
+    private(set) var selectedChip: HomeChip?
     private(set) var refreshing = false
-    /// Whether the tail should show a loading shelf: a continuation page, or a first-page request
-    /// still on its way (Android's `homeLoadingMore`).
-    var loadingMore: Bool { pagingMore || pendingShelves > 0 }
-    /// The listener the current feed belongs to; a change reloads.
     private(set) var loadedFor: String??
-    /// The page each listener had when we left them, keyed by `listenerKey`, so switching back
-    /// paints at once while the first page is fetched behind it (beyond Android, whose
-    /// `ListenerSnapshot` has no home). The key is `loadedFor`, whose page is on screen, so one
-    /// listener's shelves are never filed under another's. Signing out drops them all.
-    private var snapshots: [String: [HomeShelf]] = [:]
-
     private(set) var continuation: String?
-    private var pagingMore = false
-    private var pendingShelves = 0
-    private var seenTitles: Set<String> = []
-    private var generation = 0
-    private let supplementIds: [String]
+    var loadingMore: Bool { pagingMore || loadingFirstPage }
 
-    init(supplementIds: [String] = BrowseCatalogDefaults.homeSupplementBrowseIds) {
-        self.supplementIds = supplementIds
+    private struct Snapshot {
+        var shelves: [HomeShelf]
+        var chips: [HomeChip]
+        var selectedChip: HomeChip?
     }
 
-    /// Whether the feed was loaded for `listener` (nil = signed out).
+    private var snapshots: [String: Snapshot] = [:]
+    private var pagingMore = false
+    private var loadingFirstPage = false
+    private var seenTitles: Set<String> = []
+    private var generation = 0
+
     func isLoaded(for listener: String?) -> Bool { loadedFor == .some(listener) }
 
-    /// The first page, from scratch: the page drops back to its skeleton, or, for a listener we
-    /// switched away from, to the shelves they had then.
+    /// Restore only this listener's page while fetching its fresh replacement.
     func load(_ catalog: BrowseCatalog, listener: String?, signedIn: Bool) async {
+        let sameListener = isLoaded(for: listener)
         if listener == nil {
             snapshots.removeAll()
         } else if case .some(.some(let leaving)) = loadedFor, leaving != listener, let shelves = state.value {
-            snapshots[leaving] = shelves
+            snapshots[leaving] = Snapshot(shelves: shelves, chips: chips, selectedChip: selectedChip)
         }
+        let snapshot = listener.flatMap { snapshots.removeValue(forKey: $0) }
+        if !sameListener {
+            chips = snapshot?.chips ?? []
+            selectedChip = snapshot?.selectedChip
+        }
+        state = snapshot.map { LoadState.success($0.shelves) } ?? .loading
+        loadedFor = .some(listener)
+        await loadFirstPage(catalog, listener: listener)
+    }
+
+    /// Re-tapping the selected chip (or clearing it) returns to the unfiltered Home.
+    func selectChip(_ chip: HomeChip?, catalog: BrowseCatalog, listener: String?) async {
+        guard isLoaded(for: listener) else { return }
+        if let chip, !chip.isSelected, !matchesSelection(chip) {
+            var target = chip
+            target.isSelected = false
+            selectedChip = target
+        } else {
+            selectedChip = nil
+        }
+        chips = chips.map { entry in
+            var entry = entry
+            entry.isSelected = matchesSelection(entry)
+            return entry
+        }
+        state = .loading
+        await loadFirstPage(catalog, listener: listener)
+    }
+
+    private func matchesSelection(_ chip: HomeChip) -> Bool {
+        guard let selectedChip else { return false }
+        return chip.browseId == selectedChip.browseId && chip.params == selectedChip.params
+    }
+
+    private func loadFirstPage(_ catalog: BrowseCatalog, listener: String?) async {
         generation += 1
         let mine = generation
-        loadedFor = .some(listener)
-        let snapshot = listener.flatMap { snapshots.removeValue(forKey: $0) }
-        state = snapshot.map { LoadState.success($0) } ?? .loading
         continuation = nil
-        // Only what this load has published: a snapshot's shelves are stand-ins, each replaced in
-        // place by its fresh copy as it lands, never a reason to drop that copy.
-        seenTitles.removeAll()
         pagingMore = false
-        // The snapshot's own Recents (or its lack of one) stands in for the skeleton.
-        recentlyPlayedLoading = signedIn && snapshot == nil
-        pendingShelves = 1 + supplementIds.count
-
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask { @MainActor in
-                defer { self.shelfRequestSettled(mine) }
-                do {
-                    let feed = try await catalog.home()
-                    guard self.generation == mine else { return }
-                    self.continuation = feed.continuation
-                    self.publish(feed.shelves)
-                } catch {
-                    guard self.generation == mine, self.state.value == nil else { return }
-                    if error is CancellationError { return }
-                    self.state = .error(BrowseErrorText.friendly(error))
-                }
-            }
-            if signedIn {
-                group.addTask { @MainActor in
-                    let recent = try? await catalog.homeRecentlyPlayed()
-                    guard self.generation == mine else { return }
-                    self.recentlyPlayedLoading = false
-                    if let recent { self.publish([recent], prepend: true) }
-                }
-            }
-            for browseId in supplementIds {
-                group.addTask { @MainActor in
-                    defer { self.shelfRequestSettled(mine) }
-                    guard let shelves = try? await catalog.homeSupplement(browseId: browseId),
-                          self.generation == mine else { return }
-                    self.publish(shelves)
-                }
-            }
-        }
-        // Every request has answered: a snapshot shelf the fresh page didn't carry goes, so the
-        // page ends as a load from scratch would have. If nothing was published (every request
-        // failed or came back empty, which leaves a load from scratch on its skeleton or an error),
-        // the listener's own shelves stay up instead.
-        if snapshot != nil, generation == mine, !seenTitles.isEmpty, let shelves = state.value {
-            state = .success(shelves.filter { seenTitles.contains($0.feedKey) })
+        refreshing = false
+        loadingFirstPage = true
+        defer { if generation == mine { loadingFirstPage = false } }
+        do {
+            let feed = try await catalog.home(chip: selectedChip)
+            guard generation == mine, isLoaded(for: listener) else { return }
+            apply(feed)
+        } catch {
+            guard generation == mine, isLoaded(for: listener), state.value == nil else { return }
+            if error is CancellationError { return }
+            state = .error(BrowseErrorText.friendly(error))
         }
     }
 
-    /// Pull to refresh: re-fetches the core feed (and Recents) without blanking the page.
-    ///
-    /// The fetch runs in a task of its own, as Android's runs in `viewModelScope`. SwiftUI cancels
-    /// the task `refreshable` hands us while the pull is still in flight, so fetching on that one
-    /// failed every time ("home failed: cancelled") and the spinner dropped with nothing refreshed.
+    /// Keep the page visible, fetching independently of SwiftUI's cancelled refresh task.
     func refresh(_ catalog: BrowseCatalog, listener: String?, signedIn: Bool) async {
-        await Task { await fetchRefresh(catalog, listener: listener, signedIn: signedIn) }.value
+        await Task { await fetchRefresh(catalog, listener: listener) }.value
     }
 
-    private func fetchRefresh(_ catalog: BrowseCatalog, listener: String?, signedIn: Bool) async {
-        guard !refreshing else { return }
+    private func fetchRefresh(_ catalog: BrowseCatalog, listener: String?) async {
+        guard !refreshing, !loadingFirstPage, isLoaded(for: listener) else { return }
+        generation += 1
+        let mine = generation
         refreshing = true
-        defer { refreshing = false }
-        let mine = generation
-        async let recentFetch: HomeShelf?? = signedIn ? (try? await catalog.homeRecentlyPlayed()) : nil
-        if let feed = try? await catalog.home(), generation == mine, loadedFor == .some(listener) {
-            continuation = feed.continuation
-            seenTitles.removeAll()
-            let shelves = feed.shelves.filter { seenTitles.insert($0.title.lowercased()).inserted }
-            if !shelves.isEmpty { state = .success(shelves) }
-        }
-        if let recentAnswer = await recentFetch, let recent = recentAnswer, generation == mine, loadedFor == .some(listener) {
-            publish([recent], prepend: true)
+        pagingMore = false
+        defer { if generation == mine { refreshing = false } }
+        if let feed = try? await catalog.home(chip: selectedChip), generation == mine, isLoaded(for: listener) {
+            apply(feed)
         }
     }
 
-    /// The next page, as the list nears its end. A no-op while a page is in flight, once the feed
-    /// is exhausted, or before the first page landed — `continuation` covers all three.
+    private func apply(_ feed: HomeFeed) {
+        seenTitles.removeAll()
+        state = .success(feed.shelves.filter { seenTitles.insert($0.feedKey).inserted })
+        continuation = feed.continuation
+        chips = feed.chips
+        // Preserve the user's request target: a selected server chip can point to deselection.
+        if selectedChip == nil, var selected = chips.first(where: {
+            $0.isSelected && ($0.browseId != "FEmusic_home" || $0.params != nil)
+        }) {
+            // The repository interprets a selected request target as clear.
+            selected.isSelected = false
+            selectedChip = selected
+        }
+    }
+
+    /// Continuation tokens belong to the current chip page; stale pages never append.
     func loadMore(_ catalog: BrowseCatalog) async {
-        guard let token = continuation, !pagingMore else { return }
+        guard let token = continuation, !pagingMore, !loadingFirstPage, !refreshing else { return }
         let mine = generation
+        let listener = loadedFor
         pagingMore = true
         defer { if generation == mine { pagingMore = false } }
-        guard let feed = try? await catalog.moreHome(token: token), generation == mine else { return }
-        let added = feed.shelves.filter { seenTitles.insert($0.title.lowercased()).inserted }
-        // A page with nothing new means the feed has looped back on itself rather than run dry
-        // with a token still attached: treat it as exhausted so scrolling can't spin here.
+        guard let feed = try? await catalog.moreHome(token: token), generation == mine, loadedFor == listener else { return }
+        let added = feed.shelves.filter { seenTitles.insert($0.feedKey).inserted }
         continuation = added.isEmpty ? nil : feed.continuation
         if !added.isEmpty { state = .success((state.value ?? []) + added) }
-    }
-
-    private func shelfRequestSettled(_ mine: Int) {
-        guard generation == mine else { return }
-        pendingShelves = max(0, pendingShelves - 1)
-    }
-
-    /// `publishHomeShelves`: appends unseen shelves; a prepended shelf (Recents) replaces any shelf
-    /// of the same title, since YouTube's core home can carry a stale "Recently played" of its own.
-    /// An unseen shelf whose title is already on the page is a snapshot's stand-in: it is replaced
-    /// where it stands, so the core feed, the supplements and Recents can land in any order over a
-    /// snapshot without one of them dropping or doubling another's shelves.
-    private func publish(_ shelves: [HomeShelf], prepend: Bool = false) {
-        var page = state.value ?? []
-        if prepend {
-            let replacing = Set(shelves.map(\.feedKey))
-            seenTitles.formUnion(replacing)
-            state = .success(shelves + page.filter { !replacing.contains($0.feedKey) })
-            return
-        }
-        let added = shelves.filter { seenTitles.insert($0.feedKey).inserted }
-        guard !added.isEmpty else { return }
-        for shelf in added {
-            if let index = page.firstIndex(where: { $0.feedKey == shelf.feedKey }) {
-                page[index] = shelf
-            } else {
-                page.append(shelf)
-            }
-        }
-        state = .success(page)
     }
 }

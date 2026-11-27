@@ -130,6 +130,7 @@ func makeStubbedRepository(routes: [InnerTubeStub.Route] = InnerTubeStub.standar
 /// A catalogue whose every answer the test scripts. Unscripted calls fail.
 final class ScriptedCatalog: BrowseCatalog, @unchecked Sendable {
     var homeAnswer: () async throws -> HomeFeed = { throw URLError(.badServerResponse) }
+    var chipAnswer: (HomeChip?) async throws -> HomeFeed = { _ in throw URLError(.badServerResponse) }
     var recentAnswer: () async throws -> HomeShelf? = { nil }
     var supplementAnswers: [String: () async throws -> [HomeShelf]] = [:]
     var moreAnswer: (String) async throws -> HomeFeed = { _ in HomeFeed(shelves: [], continuation: nil) }
@@ -147,6 +148,11 @@ final class ScriptedCatalog: BrowseCatalog, @unchecked Sendable {
     private func record(_ call: String) { lock.withLock { _calls.append(call) } }
 
     func home() async throws -> HomeFeed { record("home"); return try await homeAnswer() }
+    func home(chip: HomeChip?) async throws -> HomeFeed {
+        guard let chip else { return try await home() }
+        record("chip:\(chip.browseId):\(chip.params ?? "")")
+        return try await chipAnswer(chip)
+    }
     func homeRecentlyPlayed() async throws -> HomeShelf? { record("recent"); return try await recentAnswer() }
     func homeSupplement(browseId: String) async throws -> [HomeShelf] {
         record("supplement:\(browseId)")
