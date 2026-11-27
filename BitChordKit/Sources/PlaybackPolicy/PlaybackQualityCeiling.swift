@@ -78,7 +78,11 @@ public final class PlaybackQualityCeiling: Observable, @unchecked Sendable {
     /// `DirectSourceGate.isActive`): a party seeks every member to the host's position and expects
     /// the track to be there, and a start held for the sources would leave this phone behind.
     public var currentRequest: StreamRequest {
-        let (directSource, inParty, automatic, wait) = lock.withLock { (directSource, inParty, automaticSourceSwitch, sourceWaitSeconds) }
+        // Typed explicitly: Xcode 26.6's compiler cannot infer this tuple through `withLock`.
+        let snapshot: (DirectSourceStream, Bool, Bool, TimeInterval) = lock.withLock {
+            (directSource, inParty, automaticSourceSwitch, sourceWaitSeconds)
+        }
+        let (directSource, inParty, automatic, wait) = snapshot
         // A party disables waits/preparation, not the selected quality ceiling. Fast mode
         // keeps its YouTube-only policy; the other modes retain their quality/source permissions.
         var request = StreamRequest.playback(effectiveQuality, directSource: directSource,
