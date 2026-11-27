@@ -80,7 +80,7 @@ public final class PlaybackQualityCeiling: Observable, @unchecked Sendable {
     public var currentRequest: StreamRequest {
         // Typed explicitly: Xcode 26.6's compiler cannot infer this tuple through `withLock`.
         let snapshot: (DirectSourceStream, Bool, Bool, TimeInterval) = lock.withLock {
-            (directSource, inParty, automaticSourceSwitch, sourceWaitSeconds)
+            (self.directSource, self.inParty, self.automaticSourceSwitch, self.sourceWaitSeconds)
         }
         let (directSource, inParty, automatic, wait) = snapshot
         // A party disables waits/preparation, not the selected quality ceiling. Fast mode
