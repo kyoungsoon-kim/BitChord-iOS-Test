@@ -89,6 +89,8 @@ final class OfficialHomeParsingTests: XCTestCase {
         let shelves = InnerTubeParser.parseHome(response, allowVideos: true)
         XCTAssertEqual(shelves.map(\.title), ["For the evening", "Next shelf"])
         XCTAssertEqual(shelves[0].subtitle, "Made for you")
+        XCTAssertEqual(shelves[0].layout, .cards)
+        XCTAssertNil(shelves[0].rowsPerColumn)
         XCTAssertEqual(shelves[0].items.map(\.title), ["A mix", "Episode one"])
         let episode = try XCTUnwrap(shelves[0].items.last)
         XCTAssertEqual(episode.videoId, "episode1")
@@ -126,8 +128,108 @@ final class OfficialHomeParsingTests: XCTestCase {
         let feed = try JSONDecoder().decode(HomeFeed.self, from: old)
         XCTAssertEqual(feed.chips, [])
         XCTAssertNil(feed.shelves.first?.items.first?.isVideo)
+        XCTAssertNil(feed.shelves.first?.items.first?.artist)
         let updated = HomeFeed(shelves: feed.shelves, continuation: "next", chips: [HomeChip(title: "Focus", browseId: "FEfocus")])
         XCTAssertEqual(try JSONDecoder().decode(HomeFeed.self, from: JSONEncoder().encode(updated)), updated)
+    }
+
+    func testHomeListLayoutPreservesDisplayColumnsAndPlayAllWithoutChangingOtherPages() throws {
+        let response = home(#"""
+        [{"musicCarouselShelfRenderer":{
+          "numItemsPerColumn":"3",
+          "header":{"musicCarouselShelfBasicHeaderRenderer":{
+            "title":{"runs":[{"text":"Quick picks"}]},
+            "moreContentButton":{"buttonRenderer":{"navigationEndpoint":{
+              "watchPlaylistEndpoint":{"playlistId":"RDquick","params":"PLAY_ALL"}
+            }}}
+          }},
+          "contents":[{"musicResponsiveListItemRenderer":{
+            "playlistItemData":{"videoId":"track"},
+            "flexColumns":[
+              {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Track title"}]}}},
+              {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[
+                {"text":"Dua Lipa","navigationEndpoint":{"browseEndpoint":{"browseId":"UCdua",
+                  "browseEndpointContextSupportedConfigs":{"browseEndpointContextMusicConfig":{"pageType":"MUSIC_PAGE_TYPE_ARTIST"}}}}},
+                {"text":" 및 "},
+                {"text":"Grand Theft Auto VI","navigationEndpoint":{"browseEndpoint":{"browseId":"UCgta",
+                  "browseEndpointContextSupportedConfigs":{"browseEndpointContextMusicConfig":{"pageType":"MUSIC_PAGE_TYPE_ARTIST"}}}}}
+              ]}}},
+              {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"819만회 "},{"text":"재생"}]}}},
+              {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":" "}]}}}
+            ]
+          }}]
+        }}]
+        """#)
+        let shelves = InnerTubeParser.parseHome(response, allowVideos: true)
+        let shelf = try XCTUnwrap(shelves.first)
+        XCTAssertEqual(shelf.layout, .list)
+        XCTAssertEqual(shelf.rowsPerColumn, 3)
+        XCTAssertEqual(shelf.playAllPlaylistId, "RDquick")
+        XCTAssertEqual(shelf.playAllParams, "PLAY_ALL")
+        XCTAssertEqual(shelf.items.first?.subtitle, "Dua Lipa 및 Grand Theft Auto VI • 819만회 재생")
+        XCTAssertEqual(shelf.items.first?.artist, "Dua Lipa, Grand Theft Auto VI")
+        XCTAssertEqual(InnerTubeParser.artistFromSubtitle(try XCTUnwrap(shelf.items.first?.subtitle)), "Dua Lipa 및 Grand Theft Auto VI")
+        XCTAssertEqual(InnerTubeParser.parseHomeContinuation(response, allowVideos: true), shelves)
+
+        let otherPage = try XCTUnwrap(InnerTubeParser.parseHome(response).first)
+        XCTAssertEqual(otherPage.layout, .cards)
+        XCTAssertNil(otherPage.rowsPerColumn)
+        XCTAssertNil(otherPage.playAllPlaylistId)
+        XCTAssertNil(otherPage.playAllParams)
+        XCTAssertNil(otherPage.items.first?.artist)
+        XCTAssertEqual(otherPage.items.first?.subtitle, "Dua Lipa, Grand Theft Auto VI")
+    }
+
+    func testHomeListLayoutAcceptsNumericColumnCountsAndWatchEndpoint() throws {
+        let row = #"""
+        {"musicResponsiveListItemRenderer":{"playlistItemData":{"videoId":"track"},
+          "flexColumns":[
+            {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Track"}]}}},
+            {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Artist"}]}}},
+            {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"1M plays"}]}}}
+          ]}}
+        """#
+        let response = home(#"""
+        [
+          {"musicCarouselShelfRenderer":{"numItemsPerColumn":2,
+            "header":{"musicCarouselShelfBasicHeaderRenderer":{
+              "title":{"runs":[{"text":"Two rows"}]},
+              "moreContentButton":{"buttonRenderer":{"navigationEndpoint":{
+                "watchEndpoint":{"playlistId":"RDtwo","params":"TWO"}
+              }}}
+            }},
+            "contents":[{"musicTwoRowItemRenderer":{"title":{"runs":[{"text":"Card"}]},
+              "navigationEndpoint":{"watchEndpoint":{"videoId":"card"}}}}]}},
+          {"musicCarouselShelfRenderer":{"contents":[\#(row)]}},
+          {"musicShelfRenderer":{"title":{"runs":[{"text":"Plain list"}]},"contents":[\#(row)]}},
+          {"musicCarouselShelfRenderer":{"numItemsPerColumn":0,"contents":[\#(row)]}}
+        ]
+        """#)
+        let shelves = InnerTubeParser.parseHome(response, allowVideos: true)
+        XCTAssertEqual(shelves.map(\.layout), [.list, .list, .list, .list])
+        XCTAssertEqual(shelves.map(\.rowsPerColumn), [2, 4, 4, 4])
+        XCTAssertEqual(shelves[0].playAllPlaylistId, "RDtwo")
+        XCTAssertEqual(shelves[0].playAllParams, "TWO")
+        XCTAssertEqual(shelves[2].items.first?.subtitle, "Artist • 1M plays")
+        XCTAssertEqual(shelves[2].items.first?.artist, "Artist")
+        let otherPage = InnerTubeParser.parseHome(response)
+        XCTAssertTrue(otherPage.allSatisfy { $0.layout == .cards && $0.rowsPerColumn == nil })
+    }
+
+    func testOldHomeShelfDefaultsToCardsAndNewFieldsRoundTrip() throws {
+        let old = Data(#"{"title":"Listen again","items":[],"subtitle":"For you","moreBrowseId":"VLmix","moreParams":"MORE"}"#.utf8)
+        var shelf = try JSONDecoder().decode(HomeShelf.self, from: old)
+        XCTAssertEqual(shelf.layout, .cards)
+        XCTAssertNil(shelf.rowsPerColumn)
+        XCTAssertNil(shelf.playAllPlaylistId)
+        XCTAssertNil(shelf.playAllParams)
+        XCTAssertEqual(shelf.moreBrowseId, "VLmix")
+        XCTAssertEqual(shelf.moreParams, "MORE")
+        shelf.layout = .list
+        shelf.rowsPerColumn = 3
+        shelf.playAllPlaylistId = "RDmix"
+        shelf.playAllParams = "PLAY"
+        XCTAssertEqual(try JSONDecoder().decode(HomeShelf.self, from: JSONEncoder().encode(shelf)), shelf)
     }
 
     private func home(_ contents: String, header: String = "{}") -> InnerTubeJSON {

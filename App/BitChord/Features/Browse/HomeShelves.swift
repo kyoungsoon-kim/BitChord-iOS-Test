@@ -9,7 +9,7 @@ import SwiftUI
 struct BrowseSectionHeader: View {
     let title: String
     var subtitle: String = ""
-    /// Only Recents carries a trailing control (its layout toggle).
+    /// An optional shelf action, such as Play all or Recents' layout toggle.
     var trailing: AnyView?
 
     var body: some View {
@@ -59,6 +59,141 @@ struct HomeShelfRow: View {
             .scrollClipDisabled()
         }
         .padding(.bottom, BrowseMetrics.shelfBottom)
+    }
+}
+
+/// Home's opening speed dial: nine square tiles per full-width page, without a heading.
+struct HomeSpeedDialShelf: View {
+    let shelf: HomeShelf
+    let width: CGFloat
+    let onOpen: (ShelfItem) -> Void
+    var onMenu: ((ShelfItem) -> Void)?
+
+    @State private var page: Int? = 0
+    private let spacing: CGFloat = 8
+
+    private var pages: [[ShelfItem]] {
+        stride(from: 0, to: shelf.items.count, by: 9).map {
+            Array(shelf.items[$0..<min($0 + 9, shelf.items.count)])
+        }
+    }
+
+    var body: some View {
+        let tileWidth = max(1, (width - BrowseMetrics.gutter * 2 - spacing * 2) / 3)
+        let gridHeight = tileWidth * 3 + spacing * 2
+        VStack(spacing: 12) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 0) {
+                    ForEach(Array(pages.enumerated()), id: \.offset) { index, items in
+                        LazyVGrid(columns: Array(repeating: GridItem(.fixed(tileWidth), spacing: spacing), count: 3), spacing: spacing) {
+                            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                                tile(item, width: tileWidth)
+                                    .cardGestures(item: item, onOpen: onOpen, onMenu: onMenu)
+                            }
+                        }
+                        .frame(width: width, height: gridHeight, alignment: .top)
+                        .id(index)
+                    }
+                }
+                .scrollTargetLayout()
+            }
+            .frame(width: width, height: gridHeight)
+            .scrollTargetBehavior(.paging)
+            .scrollPosition(id: $page)
+            if pages.count > 1 {
+                HStack(spacing: 6) {
+                    ForEach(pages.indices, id: \.self) { index in
+                        Circle()
+                            .fill(index == (page ?? 0) ? Color.primary : Color.secondary.opacity(0.3))
+                            .frame(width: 5, height: 5)
+                    }
+                }
+                .accessibilityHidden(true)
+            }
+        }
+        .padding(.top, 8)
+        .padding(.bottom, BrowseMetrics.shelfBottom)
+        .accessibilityIdentifier("home.speedDial")
+    }
+
+    private func tile(_ item: ShelfItem, width: CGFloat) -> some View {
+        CroppedArtwork(raw: item.thumbnailUrl, pixels: ArtworkSize.card, width: width, cornerRadius: 12)
+            .overlay(alignment: .bottomLeading) {
+                HStack(spacing: 3) {
+                    Text(item.title)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if item.videoId == nil, item.browseId != nil {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                    }
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 8)
+                .padding(.bottom, 8)
+                .padding(.top, 22)
+                .background(LinearGradient(colors: [.clear, .black.opacity(0.8)], startPoint: .top, endPoint: .bottom))
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .accessibilityLabel(item.title)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityIdentifier("home.speedDialTile")
+    }
+}
+
+/// Server-defined track columns, with the next column peeking beyond the current one.
+struct HomeListShelf: View {
+    let shelf: HomeShelf
+    let width: CGFloat
+    let onOpen: (ShelfItem) -> Void
+    var onMenu: ((ShelfItem) -> Void)?
+    let onPlayAll: () -> Void
+
+    private var columns: [[ShelfItem]] {
+        let count = max(1, shelf.rowsPerColumn ?? 4)
+        return stride(from: 0, to: shelf.items.count, by: count).map {
+            Array(shelf.items[$0..<min($0 + count, shelf.items.count)])
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            BrowseSectionHeader(title: shelf.title, subtitle: shelf.subtitle,
+                                trailing: shelf.playAllPlaylistId == nil ? nil : AnyView(playAllButton))
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 12) {
+                    ForEach(Array(columns.enumerated()), id: \.offset) { _, items in
+                        VStack(spacing: 0) {
+                            ForEach(Array(items.enumerated()), id: \.offset) { index, item in
+                                RecentTrackRow(item: item, onOpen: onOpen, onMenu: onMenu)
+                                    .prefetchingCovers(after: index, in: items, ahead: 4, pixels: ArtworkSize.row) { [$0.thumbnailUrl] }
+                            }
+                        }
+                        .frame(width: max(1, width - BrowseMetrics.gutter - 32), alignment: .leading)
+                    }
+                }
+                .scrollTargetLayout()
+                .padding(.horizontal, BrowseMetrics.gutter)
+            }
+            .scrollTargetBehavior(.viewAligned)
+            .scrollClipDisabled()
+        }
+        .padding(.bottom, BrowseMetrics.shelfBottom)
+        .accessibilityIdentifier("home.listShelf")
+    }
+
+    private var playAllButton: some View {
+        Button(action: onPlayAll) {
+            Text(L10n.tr("home_play_all"))
+                .font(BrowseFont.label)
+                .lineLimit(1)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .overlay(Capsule().strokeBorder(Color.primary.opacity(0.3), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("home.playAll")
     }
 }
 
@@ -240,7 +375,7 @@ struct RecentShelf: View {
 }
 
 /// `RecentTrackRow`: a compact track row with a More button (the long-press menu).
-private struct RecentTrackRow: View {
+struct RecentTrackRow: View {
     let item: ShelfItem
     let onOpen: (ShelfItem) -> Void
     var onMenu: ((ShelfItem) -> Void)?

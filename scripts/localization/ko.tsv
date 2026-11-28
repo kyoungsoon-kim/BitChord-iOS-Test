@@ -666,3 +666,4 @@ signed_in_as	%1$@ 계정으로 로그인됨
 listen_together_in_party	함께 듣는 중 · %1$@
 download_done_count	%1$lld곡 완료
 download_failed_count	%1$lld곡 실패
+home_play_all	모두 재생

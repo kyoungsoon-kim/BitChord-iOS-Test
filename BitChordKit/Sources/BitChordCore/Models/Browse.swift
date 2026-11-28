@@ -134,15 +134,24 @@ public struct ShelfItem: Codable, Hashable, Sendable {
     public var browseId: String?
     /// Nil on older cached cards; treated as a catalogue audio track.
     public var isVideo: Bool?
+    /// Playback credit kept separate from a list row's display subtitle (which can include views).
+    public var artist: String?
 
-    public init(title: String, subtitle: String, thumbnailUrl: String?, videoId: String?, browseId: String?, isVideo: Bool? = nil) {
+    public init(title: String, subtitle: String, thumbnailUrl: String?, videoId: String?, browseId: String?, isVideo: Bool? = nil, artist: String? = nil) {
         self.title = title
         self.subtitle = subtitle
         self.thumbnailUrl = thumbnailUrl
         self.videoId = videoId
         self.browseId = browseId
         self.isVideo = isVideo
+        self.artist = artist
     }
+}
+
+/// The server's presentation for a Home shelf.
+public enum HomeShelfLayout: String, Codable, Hashable, Sendable {
+    case cards
+    case list
 }
 
 /// One carousel of the Home feed, Library or an artist page.
@@ -153,19 +162,49 @@ public struct HomeShelf: Codable, Hashable, Sendable {
     public var subtitle: String
     public var moreBrowseId: String?
     public var moreParams: String?
+    public var layout: HomeShelfLayout
+    public var rowsPerColumn: Int?
+    public var playAllPlaylistId: String?
+    public var playAllParams: String?
 
     public init(
         title: String,
         items: [ShelfItem],
         subtitle: String = "",
         moreBrowseId: String? = nil,
-        moreParams: String? = nil
+        moreParams: String? = nil,
+        layout: HomeShelfLayout = .cards,
+        rowsPerColumn: Int? = nil,
+        playAllPlaylistId: String? = nil,
+        playAllParams: String? = nil
     ) {
         self.title = title
         self.items = items
         self.subtitle = subtitle
         self.moreBrowseId = moreBrowseId
         self.moreParams = moreParams
+        self.layout = layout
+        self.rowsPerColumn = rowsPerColumn
+        self.playAllPlaylistId = playAllPlaylistId
+        self.playAllParams = playAllParams
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case title, items, subtitle, moreBrowseId, moreParams
+        case layout, rowsPerColumn, playAllPlaylistId, playAllParams
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        title = try values.decode(String.self, forKey: .title)
+        items = try values.decode([ShelfItem].self, forKey: .items)
+        subtitle = try values.decodeIfPresent(String.self, forKey: .subtitle) ?? ""
+        moreBrowseId = try values.decodeIfPresent(String.self, forKey: .moreBrowseId)
+        moreParams = try values.decodeIfPresent(String.self, forKey: .moreParams)
+        layout = try values.decodeIfPresent(HomeShelfLayout.self, forKey: .layout) ?? .cards
+        rowsPerColumn = try values.decodeIfPresent(Int.self, forKey: .rowsPerColumn)
+        playAllPlaylistId = try values.decodeIfPresent(String.self, forKey: .playAllPlaylistId)
+        playAllParams = try values.decodeIfPresent(String.self, forKey: .playAllParams)
     }
 }
 

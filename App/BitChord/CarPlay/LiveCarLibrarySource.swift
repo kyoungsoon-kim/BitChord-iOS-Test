@@ -31,7 +31,7 @@ final class LiveCarLibrarySource: CarLibrarySource {
         let feed = await withDeadline(.seconds(2.5)) { try? await repository.home() }
         return (feed?.shelves ?? []).flatMap(\.items).compactMap { item in
             guard let videoId = item.videoId else { return nil }
-            return Song(videoId: videoId, title: item.title, artist: InnerTubeParser.artistFromSubtitle(item.subtitle),
+            return Song(videoId: videoId, title: item.title, artist: item.artist ?? InnerTubeParser.artistFromSubtitle(item.subtitle),
                         thumbnailUrl: item.thumbnailUrl, isVideo: item.isVideo ?? false)
         }
     }

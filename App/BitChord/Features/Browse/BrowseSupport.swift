@@ -130,7 +130,7 @@ extension ShelfItem {
     /// ("Song • Chelsea Wolfe" → "Chelsea Wolfe"), or nil when the card is a collection.
     var shelfSong: Song? {
         guard let videoId, !videoId.isEmpty else { return nil }
-        return Song(videoId: videoId, title: title, artist: InnerTubeParser.artistFromSubtitle(subtitle),
+        return Song(videoId: videoId, title: title, artist: artist ?? InnerTubeParser.artistFromSubtitle(subtitle),
                     thumbnailUrl: thumbnailUrl, isVideo: isVideo ?? false)
     }
 

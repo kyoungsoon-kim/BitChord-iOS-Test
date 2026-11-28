@@ -163,8 +163,13 @@ struct HomeScreen: View {
         let open: (ShelfItem) -> Void = { item in openItem(item, shelfTitle: shelf.title) }
         if index == 0 && shelf.title.caseInsensitiveCompare(Self.recentsTitle) == .orderedSame {
             RecentShelf(shelf: shelf, width: width, onOpen: open, onMenu: openMenu)
+        } else if shelf.layout == .list {
+            HomeListShelf(shelf: shelf, width: width, onOpen: open, onMenu: openMenu) {
+                // The current watch API accepts video ids only; play the visible shelf in order.
+                model.player.play(shelf.items.compactMap(\.shelfSong), source: QueueSource(title: shelf.title, type: .home))
+            }
         } else if index == 0 {
-            HeroShelf(shelf: shelf, width: width, onOpen: open, onMenu: openMenu)
+            HomeSpeedDialShelf(shelf: shelf, width: width, onOpen: open, onMenu: openMenu)
         } else {
             HomeShelfRow(shelf: shelf, onOpen: open, onMenu: openMenu)
         }

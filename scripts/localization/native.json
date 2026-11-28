@@ -486,5 +486,9 @@
   "WG_COMPARE_CLIENTS_DETAIL": {
     "en": "Compares proxy and direct media for one song per launch after 20 seconds of playback. Does not change the playing source. Restart after changing.",
     "ko": "재생 20초 후 한 곡의 클라이언트별 프록시·직접 연결을 비교합니다. 실행당 한 곡만 검사하며 재생 음원은 바꾸지 않습니다. 변경 후 앱을 다시 열어 주세요."
+  },
+  "home_play_all": {
+    "en": "Play all",
+    "ko": "모두 재생"
   }
 }

@@ -300,6 +300,10 @@ final class HomeFeedTests: XCTestCase {
         XCTAssertEqual(song.shelfSong?.artist, "Chelsea Wolfe")
         XCTAssertNil(song.shelfBrowseItem)
 
+        let listItem = ShelfItem(title: "Track", subtitle: "Dua Lipa 및 Grand Theft Auto VI • 819만회 재생",
+                                 thumbnailUrl: nil, videoId: "v2", browseId: nil, artist: "Dua Lipa, Grand Theft Auto VI")
+        XCTAssertEqual(listItem.shelfSong?.artist, "Dua Lipa, Grand Theft Auto VI")
+
         let album = ShelfItem(title: "Birth of Violence", subtitle: "Album • Chelsea Wolfe", thumbnailUrl: nil, videoId: nil, browseId: "MPREb_x")
         XCTAssertNil(album.shelfSong)
         XCTAssertEqual(album.shelfBrowseItem?.type, .album)

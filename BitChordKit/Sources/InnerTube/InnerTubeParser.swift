@@ -287,9 +287,16 @@ public enum InnerTubeParser {
         let title = header.o("title").runs()
         let strapline = header.o("strapline").runs()
         if !allowVideos, Patterns.videoWord.containsMatch(in: title) { return nil }
-        let items: [ShelfItem] = (carousel.a("contents") ?? []).compactMap { item in
+        let contents = carousel.a("contents") ?? []
+        let isList = allowVideos && (carousel["numItemsPerColumn"] != nil
+            || contents.contains { $0.o("musicResponsiveListItemRenderer") != nil })
+        let playAll = allowVideos ? homePlayAllEndpoint(header) : nil
+        let items: [ShelfItem] = contents.compactMap { item in
             if let card = parseTwoRowItem(item.o("musicTwoRowItemRenderer"), allowVideos: allowVideos) { return card }
             if let song = parseResponsiveListItem(item.o("musicResponsiveListItemRenderer")), allowVideos || !song.isVideo {
+                if isList, let renderer = item.o("musicResponsiveListItemRenderer") {
+                    return homeListItem(song, renderer: renderer)
+                }
                 return ShelfItem(title: song.title, subtitle: song.artist, thumbnailUrl: song.thumbnailUrl,
                                  videoId: song.videoId, browseId: nil, isVideo: song.isVideo ? true : nil)
             }
@@ -306,22 +313,57 @@ public enum InnerTubeParser {
             // A chart row with nothing to play — "Top artists" lists the artist alone, no track —
             // falls through parseResponsiveListItem (it demands a videoId) and used to drop the
             // whole shelf.
-            return parseArtistRow(item.o("musicResponsiveListItemRenderer"))
+            guard var artist = parseArtistRow(item.o("musicResponsiveListItemRenderer")) else { return nil }
+            if isList, let renderer = item.o("musicResponsiveListItemRenderer") {
+                artist.subtitle = homeListSubtitle(renderer)
+            }
+            return artist
         }
         if items.isEmpty { return nil }
-        return HomeShelf(title: title.isBlankText ? "For you" : title, items: items, subtitle: strapline)
+        return HomeShelf(title: title.isBlankText ? "For you" : title, items: items, subtitle: strapline,
+                         layout: isList ? .list : .cards,
+                         rowsPerColumn: isList ? homeRowsPerColumn(carousel) : nil,
+                         playAllPlaylistId: playAll.s("playlistId"), playAllParams: playAll.s("params"))
     }
 
     private static func plainShelf(_ shelf: InnerTubeJSON, allowVideos: Bool = false) -> HomeShelf? {
         let title = shelf.o("title").runs()
         if !allowVideos, Patterns.videoWord.containsMatch(in: title) { return nil }
-        let items = (shelf.a("contents") ?? [])
-            .compactMap { parseResponsiveListItem($0.o("musicResponsiveListItemRenderer")) }
-            .filter { allowVideos || !$0.isVideo }
-            .map { ShelfItem(title: $0.title, subtitle: $0.artist, thumbnailUrl: $0.thumbnailUrl,
-                             videoId: $0.videoId, browseId: nil, isVideo: $0.isVideo ? true : nil) }
+        let items: [ShelfItem] = (shelf.a("contents") ?? []).compactMap { item in
+            guard let renderer = item.o("musicResponsiveListItemRenderer"),
+                  let song = parseResponsiveListItem(renderer), allowVideos || !song.isVideo else { return nil }
+            if allowVideos { return homeListItem(song, renderer: renderer) }
+            return ShelfItem(title: song.title, subtitle: song.artist, thumbnailUrl: song.thumbnailUrl,
+                             videoId: song.videoId, browseId: nil, isVideo: song.isVideo ? true : nil)
+        }
         if items.isEmpty { return nil }
-        return HomeShelf(title: title.isBlankText ? "For you" : title, items: items)
+        let playAll = allowVideos ? homePlayAllEndpoint(shelf.o("header").o("musicCarouselShelfBasicHeaderRenderer")) : nil
+        return HomeShelf(title: title.isBlankText ? "For you" : title, items: items,
+                         layout: allowVideos ? .list : .cards,
+                         rowsPerColumn: allowVideos ? homeRowsPerColumn(shelf) : nil,
+                         playAllPlaylistId: playAll.s("playlistId"), playAllParams: playAll.s("params"))
+    }
+
+    private static func homeRowsPerColumn(_ shelf: InnerTubeJSON) -> Int {
+        guard let count = shelf.s("numItemsPerColumn").flatMap(Int.init), count > 0 else { return 4 }
+        return count
+    }
+
+    private static func homePlayAllEndpoint(_ header: InnerTubeJSON?) -> InnerTubeJSON? {
+        let endpoint = header.o("moreContentButton").o("buttonRenderer").o("navigationEndpoint")
+        return endpoint.o("watchPlaylistEndpoint") ?? endpoint.o("watchEndpoint")
+    }
+
+    private static func homeListSubtitle(_ renderer: InnerTubeJSON) -> String {
+        (renderer.a("flexColumns") ?? []).dropFirst()
+            .map { $0.o("musicResponsiveListItemFlexColumnRenderer").o("text").runs().trimmedText }
+            .filter { !$0.isBlankText }
+            .joined(separator: " • ")
+    }
+
+    private static func homeListItem(_ song: Song, renderer: InnerTubeJSON) -> ShelfItem {
+        ShelfItem(title: song.title, subtitle: homeListSubtitle(renderer), thumbnailUrl: song.thumbnailUrl,
+                  videoId: song.videoId, browseId: nil, isVideo: song.isVideo ? true : nil, artist: song.artist)
     }
 
     // MARK: - Artist page
